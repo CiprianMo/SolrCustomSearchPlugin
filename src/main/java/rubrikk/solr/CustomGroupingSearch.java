@@ -1,122 +1,149 @@
 package rubrikk.solr;
 
-import org.apache.lucene.index.DocValues;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.LeafReader;
-import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.search.Query;
+import org.apache.solr.common.SolrException;
+import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.common.util.Hash;
 import org.apache.solr.common.util.NamedList;
-import org.apache.solr.core.PluginInfo;
-import org.apache.solr.core.SolrCore;
+import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.handler.component.SearchComponent;
-import org.apache.solr.handler.component.ShardRequest;
-import org.apache.solr.handler.component.ShardResponse;
+import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocList;
 import org.apache.solr.search.SolrIndexSearcher;
-import org.apache.solr.util.plugin.PluginInfoInitialized;
-import org.apache.solr.util.plugin.SolrCoreAware;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.Iterator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-public class CustomGroupingSearch extends SearchComponent implements PluginInfoInitialized, SolrCoreAware {
+public class CustomGroupingSearch extends SearchComponent  {
 
     private static final Logger Log = LoggerFactory.getLogger(CustomGroupingSearch.class);
 
-    public void init(PluginInfo pluginInfo) {
+    volatile long numRequests;
+    volatile long numeErrors;
+    volatile long totalRequestTime;
+    volatile String lastNewSearcher;
+    volatile String lastOptimizedEvent;
+    volatile String defaultField;
+
+    private List<String> words;
+
+    @Override
+    public void init(NamedList args)
+    {
+        super.init(args);
+        defaultField = (String)args.get("field");
+
+        if(defaultField == null)
+            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,"Need To Specify the default for analysis");
+
+        words = ((NamedList)args.get("words")).getAll("word");
 
     }
 
-    public void prepare(ResponseBuilder rb) throws IOException {
-        Log.info("Prepare method");
-        String para=rb.req.getParamString();
+    public void prepare(ResponseBuilder responseBuilder) throws IOException {
 
-        Log.info("Req Param: "+para );
-
-        String resp = (String) rb.rsp.getResponse();
-
-        Log.info("Resp: "+resp);
-
-    }
-
-     public void inform(SolrCore solrCore) {
-        Log.info("Core schema: "+solrCore.getSchemaResource());
     }
 
     public void process(ResponseBuilder rb) throws IOException {
-        Log.info("Process method");
+        numRequests++;
+        SolrParams solrParams = rb.req.getParams();
+        long lstartTime = System.currentTimeMillis();
         SolrIndexSearcher searcher = rb.req.getSearcher();
-        LeafReader reader = searcher.getSlowAtomicReader();
+        NamedList respones = new SimpleOrderedMap();
 
-         int docCounter = 0;
-        DocList docList = rb.getResults().docList;
-        for (DocIterator it  = docList.iterator(); it.hasNext();) {
-            Log.info("docid = "+it.nextDoc());
-           docCounter++;
+        String queryFields = solrParams.get("field");
+
+        String field = null;
+        if(defaultField!=null){
+            field = defaultField;
         }
 
-        Log.info("docList size "+ docList.size());
+        if(queryFields!=null)
+            field = queryFields;
 
+        if(field==null) {
+            Log.error("Fields aren't defined ");
+            return;
+        }
+        DocList docs = rb.getResults().docList;
+        if(docs == null || docs.size()==0)
+            Log.info("No results");
+        Log.info("Doing this many results:\t"+docs.size());
 
+        Set<String> fieldSet = new HashSet<>();
 
+        SchemaField keyFields = rb.req.getCore().getLatestSchema().getUniqueKeyField();
 
-        Log.info("Doc counter= "+docCounter);
-
-
-        Log.info("response: "+rb.rsp.getReturnFields());
-
-       Query q = rb.getQuery();
-
-       if(q==null)
-       {
-           Log.info("query null");
-       }
-       else
-            Log.info("Query: "+q);
-
-       Log.info("Searcher num doc: "+ rb.req.getSearcher().numDocs());
-    }
-
-    public void handleResponses(ResponseBuilder rb, ShardRequest sreq)
-    {
-        rb.outgoing.size();
-
-        Log.info("In the response ahndler");
-
-        Log.info("response size: "+ sreq.responses.size());
-
-        Iterator var5 = sreq.responses.iterator();
-
-        while(var5.hasNext()) {
-            ShardResponse srsp = (ShardResponse)var5.next();
-            NamedList response = srsp.getSolrResponse().getResponse();
-            String ex = response.toString();
-
-            Log.info("Response to string: "+ex);
+        if(null != keyFields){
+            fieldSet.add(keyFields.getName());
         }
 
-        Log.info("Response: "+rb.rsp.getResponse());
-        Log.info("Shard: "+sreq.toString());
-    }
+        fieldSet.add(field);
 
-    public void finishStage(ResponseBuilder rb)
-    {
-        Log.info("Inside the finishStage");
-    }
+        DocIterator iterator = docs.iterator();
+        for (int i = 0; i< docs.size(); i++){
+            try {
+                int docId = iterator.nextDoc();
+                HashMap<String, Double> counts = new HashMap<String,Double>();
 
-     public int distributedProcess(ResponseBuilder rb) throws IOException {
-        Log.info("insidddddde the distr");
-        return super.distributedProcess(rb);
-     }
+                Document doc = searcher.doc(docId,fieldSet);
+                if(doc == null){
+                    Log.error("Doc not found, id: "+docId);
+                }
+                IndexableField[] multifield = doc.getFields(field);
+
+                for(IndexableField singleField:multifield){
+                    for (String string:singleField.stringValue().split(" ")){
+                        if(words.contains(string)){
+                            Double oldcount = counts.containsKey(string)?counts.get(string):0.0;
+                            counts.put(string, oldcount+1);
+                        }
+                    }
+                }
+                Log.info("KeyField: "+keyFields.getName());
+                IndexableField ident = doc.getField(keyFields.getName());
+                if(ident == null)
+                {
+                    Log.error("ident field is null ");
+                }
+                String id = doc.getField(keyFields.getName()).stringValue();
+
+                NamedList<Double> docresults = new NamedList<>();
+                for(String word:words){
+                    docresults.add(word,counts.get(word));
+                }
+
+                respones.add(id,docresults);
+            }
+            catch (IOException ex){
+                Log.error("Error: "+ex.getMessage());
+            }
+        }
+        rb.rsp.add("demoSearchComponent: ",respones);
+        totalRequestTime+=System.currentTimeMillis()-lstartTime;
+            }
 
     public String getDescription() {
         return "CustomGroupingSearch";
     }
 
 
-
+    public NamedList<Object> getStatistics(){
+        NamedList all = new SimpleOrderedMap<Object>();
+        all.add("requests",""+numRequests );
+        all.add("errors",""+numeErrors);
+        all.add("totalTime(ms)",""+totalRequestTime);
+        return all;
+    }
 
 }

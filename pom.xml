@@ -8,14 +8,27 @@
     <artifactId>custom-solr-plugins</artifactId>
     <version>1.0</version>
     <properties>
-        <solr.version>6.6.3</solr.version>
+        <solr.version>7.3.0</solr.version>
     </properties>
     <dependencies>
         <dependency>
             <groupId>org.apache.solr</groupId>
             <artifactId>solr-core</artifactId>
             <version>${solr.version}</version>
-        </dependency></dependencies>
-
+        </dependency>
+    </dependencies>
+<build>
+ <plugins>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <version>3.7.0</version>
+            <configuration>
+                <source>1.8</source>
+                <target>1.8</target>
+            </configuration>
+        </plugin>
+    </plugins>
+</build>
 
 </project>
