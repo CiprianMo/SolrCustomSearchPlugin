@@ -67,7 +67,7 @@ public class Deduplication extends SearchComponent {
                 SolrDocument docBase = new SolrDocument();
                 docFetcher.decorateDocValueFields(docBase,docId,fieldSet);
                 Map<String,Object> obj = docBase.getFieldValueMap();
-                String value = String.valueOf(obj.get(duplicateIdField.getName()));
+                String value = String.valueOf(obj.get(DUPLICATIONFIELD));
 
                 if(uniqueIds.contains(value)){
                    duplicateIds.add(value);
@@ -144,6 +144,7 @@ public class Deduplication extends SearchComponent {
         //Log.info("reasponse size: "+response.size());
         //rb.rsp.setAllValues();
         rb.rsp.add("duplications: ",dublications);
+        rb.rsp.add("unique: ",uniqueIds);
         rb.rsp.add("new response",docSet);
     }
 
