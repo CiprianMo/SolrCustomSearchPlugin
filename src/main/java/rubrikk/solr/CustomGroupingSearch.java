@@ -1,135 +1,270 @@
 package rubrikk.solr;
 
 import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexableField;
 
-import org.apache.solr.common.SolrException;
-import org.apache.solr.common.params.SolrParams;
+import org.apache.lucene.search.Query;
+import org.apache.solr.common.params.*;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.handler.component.SearchComponent;
-import org.apache.solr.schema.SchemaField;
-import org.apache.solr.search.DocIterator;
-import org.apache.solr.search.DocList;
-import org.apache.solr.search.SolrIndexSearcher;
-
+import org.apache.solr.response.transform.DocTransformer;
+import org.apache.solr.search.*;
+import org.apache.solr.search.grouping.GroupingSpecification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
 public class CustomGroupingSearch extends SearchComponent  {
 
     private static final Logger Log = LoggerFactory.getLogger(CustomGroupingSearch.class);
-
-    volatile long numRequests;
-    volatile long numeErrors;
-    volatile long totalRequestTime;
-    volatile String lastNewSearcher;
-    volatile String lastOptimizedEvent;
-    volatile String defaultField;
-
-    private List<String> words;
+    private Integer rows;
+    private static final double[] SCORE_ARRAY = { 1, 0.89, 0.82, 0.78, 0.76, 0.75, 0.74, 0.73, 0.72, 0.71, 0.7, 0.69, 0.64, 0.55, 0.42, 0.28, 0.15, 0.1, 0.08, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01 };
 
     @Override
     public void init(NamedList args)
     {
-        super.init(args);
-        defaultField = (String)args.get("field");
-
-        if(defaultField == null)
-            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,"Need To Specify the default for analysis");
-
-        words = ((NamedList)args.get("words")).getAll("word");
 
     }
 
-    public void prepare(ResponseBuilder responseBuilder) throws IOException {
+    public void prepare(ResponseBuilder rb) throws IOException {
+       SolrParams solrParams = rb.req.getParams();
 
+       rows = solrParams.getInt(CommonParams.ROWS);
+       Map<String,Object> mapParams = new HashMap<>();
+       solrParams.toMap(mapParams);
+
+        //TODO this might have to go into a custom queryparser
+       mapParams.put(CommonParams.ROWS,40);
+       mapParams.put(GroupParams.GROUP,true);
+       mapParams.put(GroupParams.GROUP_FIELD,"domain");
+       mapParams.put(GroupParams.GROUP_LIMIT,rows);
+       //mapParams.put(CommonParams.RQ,"{!rerank reRankQuery=motoring__model_year:2014 reRankDocs=40 reRankWeight=3}");
+       //mapParams.put(CommonParams.RQ,"{!rerank reRankQuery=motoring__model_year:2018 reRankDocs=40 reRankWeight=5}");
+//       mapParams.put(CommonParams.RQ,"{!rerank reRankQuery=motoring__model_year:2017 reRankDocs=10 reRankWeight=4}");
+       Log.info("Sorting: "+solrParams.get(CommonParams.SORT));
+
+        rb.req.setParams(new MapSolrParams(mapParams.entrySet().stream()
+                .collect(Collectors.toMap(x-> x.getKey(), x-> String.valueOf(x.getValue())))));
     }
 
     public void process(ResponseBuilder rb) throws IOException {
-        numRequests++;
-        SolrParams solrParams = rb.req.getParams();
-        long lstartTime = System.currentTimeMillis();
+
+
+        SolrParams solrParams= rb.req.getParams();
+        Log.info("Params in process: "+solrParams.toString());
         SolrIndexSearcher searcher = rb.req.getSearcher();
-        NamedList respones = new SimpleOrderedMap();
 
-        String queryFields = solrParams.get("field");
+        Map<String,Object> paramMap = new HashMap<>();
+        solrParams.toMap(paramMap);
 
-        String field = null;
-        if(defaultField!=null){
-            field = defaultField;
+        List<Query> filters =rb.getFilters();
+
+        try {
+            if (filters == null)
+                filters = new ArrayList<>();
+            QParser parser = QParser.getParser("motoring__model_year:2017",rb.req);
+
+            filters.add(parser.getQuery());
+        } catch (SyntaxError syntaxError) {
+            syntaxError.printStackTrace();
         }
 
-        if(queryFields!=null)
-            field = queryFields;
+        QueryResult queryResult = new QueryResult();
 
-        if(field==null) {
-            Log.error("Fields aren't defined ");
-            return;
-        }
-        DocList docs = rb.getResults().docList;
-        if(docs == null || docs.size()==0)
-            Log.info("No results");
-        Log.info("Doing this many results:\t"+docs.size());
+        QueryCommand queryCommand = rb.createQueryCommand();
 
-        Set<String> fieldSet = new HashSet<>();
+        GroupingSpecification groupSpecs= rb.getGroupingSpec();
 
-        SchemaField keyFields = rb.req.getCore().getLatestSchema().getUniqueKeyField();
 
-        if(null != keyFields){
-            fieldSet.add(keyFields.getName());
-        }
+        Grouping grouping = new Grouping(searcher,queryResult,queryCommand,false,0,groupSpecs.isMain() );
 
-        fieldSet.add(field);
+        grouping.setGroupSort(groupSpecs.getGroupSortSpec().getSort())
+                .setWithinGroupSort(groupSpecs.getWithinGroupSortSpec().getSort())
+                .setDefaultFormat(groupSpecs.getResponseFormat())
+                .setLimitDefault(queryCommand.getLen())
+                .setDocsPerGroupDefault(groupSpecs.getWithinGroupSortSpec().getCount())
+                .setGroupOffsetDefault(groupSpecs.getWithinGroupSortSpec().getOffset())
+                .setGetGroupedDocSet(groupSpecs.isTruncateGroups());
 
-        DocIterator iterator = docs.iterator();
-        for (int i = 0; i< docs.size(); i++){
-            try {
-                int docId = iterator.nextDoc();
-                HashMap<String, Double> counts = new HashMap<String,Double>();
 
-                Document doc = searcher.doc(docId,fieldSet);
-                if(doc == null){
-                    Log.error("Doc not found, id: "+docId);
+        if (groupSpecs.getFields() != null) {
+            for (String field : groupSpecs.getFields()) {
+                try {
+                    grouping.addFieldCommand(field, rb.req);
+                } catch (SyntaxError syntaxError) {
+                    syntaxError.printStackTrace();
                 }
-                IndexableField[] multifield = doc.getFields(field);
+            }
+        }
 
-                for(IndexableField singleField:multifield){
-                    for (String string:singleField.stringValue().split(" ")){
-                        if(words.contains(string)){
-                            Double oldcount = counts.containsKey(string)?counts.get(string):0.0;
-                            counts.put(string, oldcount+1);
+        if (groupSpecs.getFunctions() != null) {
+            for (String groupByStr : groupSpecs.getFunctions()) {
+                try {
+                    grouping.addFunctionCommand(groupByStr, rb.req);
+                } catch (SyntaxError syntaxError) {
+                    syntaxError.printStackTrace();
+                }
+            }
+        }
+
+        if (groupSpecs.getQueries() != null) {
+            for (String groupByStr : groupSpecs.getQueries()) {
+                try {
+                    grouping.addQueryCommand(groupByStr, rb.req);
+                } catch (SyntaxError syntaxError) {
+                    syntaxError.printStackTrace();
+                }
+            }
+        }
+
+        if( rb.isNeedDocList() || rb.isDebug() ){
+            // we need a single list of the returned docs
+            queryCommand.setFlags(SolrIndexSearcher.GET_DOCLIST);
+        }
+
+        grouping.execute();
+
+//        SimpleOrderedMap<RubrikkGrouping.Root> dataObject = (SimpleOrderedMap) queryResult.groupedResults;
+//
+//        if(dataObject !=null)
+//        {
+//            for(Map.Entry<String,RubrikkGrouping.Root> ob: dataObject.asShallowMap().entrySet())
+//            {
+//                 Log.info("Group class "+ob.getKey());
+//            }
+
+//        }
+
+        SimpleOrderedMap grouped = (SimpleOrderedMap) queryResult.groupedResults;
+
+        Map<String,Object> dataMap = grouped.asShallowMap();
+
+        for(Map.Entry<String,Object> entry: dataMap.entrySet())
+        {
+            Log.info("Loop 1: ");
+           // Log.info("Key: "+entry.getKey()+" value: "+entry.getValue());
+            Map<String,Object> domains = (HashMap)entry.getValue();
+
+
+
+            for(Map.Entry<String,Object> obj:domains.entrySet())
+            {
+                Log.info("Loop 2: ");
+                //Log.info("Key: "+obj.getKey()+" value: "+obj.getValue());
+                try
+                {
+                    ArrayList<Object> doclist = (ArrayList)obj.getValue();
+
+                    for(Object doc:doclist)
+                    {
+                        Log.info("Loop 3: ");
+                        SimpleOrderedMap<Object> objMap = (SimpleOrderedMap)doc;
+
+
+                        //Log.info("Key: "+objMap.entrySet().getKey()+" value: "+objMap.getValue());
+                        //Map<String,Object> docList = (HashMap)objMap.getValue();
+
+                        for (Map.Entry<String,Object> docSlices:objMap.asShallowMap().entrySet())
+                        {
+                            Log.info("Loop 4: ");
+                            //Log.info("Key: "+docSlices.getKey()+" value: "+docSlices.getValue());
+                            if(docSlices.getValue() instanceof DocSlice )
+                            {
+                                DocSlice docSlice = (DocSlice) docSlices.getValue();
+                                DocList docs = docSlice.subset(0,rows);
+                                DocIterator iterator = docs.iterator();
+                                for(int i =0; i<docs.size(); i++)
+                                {
+                                    int docsetid = iterator.nextDoc();
+                                    //float sc = iterator.score();
+                                    Log.info("Doc Id: "+docsetid);
+                                    //Log.info("Doc score: "+iterator.score());
+                                   // Document d = searcher.doc(iterator.nextDoc());
+                                }
+
+                            }
                         }
                     }
                 }
-                IndexableField ident = doc.getField(keyFields.getName());
-                if(ident == null)
+                catch (ClassCastException ex)
                 {
-                    Log.error("ident field is null ");
+                    Log.error("Loop 2 error "+ex.getMessage());
                 }
-                String id = doc.getField(keyFields.getName()).stringValue();
-
-                NamedList<Double> docresults = new NamedList<>();
-                for(String word:words){
-                    docresults.add(word,counts.get(word));
-                }
-
-                respones.add(id,docresults);
-            }
-            catch (IOException ex){
-                Log.error("Error: "+ex.getMessage());
             }
         }
-        rb.rsp.add("demoSearchComponent: ",respones);
-        totalRequestTime+=System.currentTimeMillis()-lstartTime;
-            }
+
+        QueryResult rslt = searcher.search(queryResult,rb.createQueryCommand());
+
+//
+//        Log.info("get field flags: "+rb.getFieldFlags());
+//        Log.info("filters: "+filters.toString());
+//
+//
+//
+//        DocList featureDocList = searcher.
+//                getDocList(rb.getQuery(),filters,rb.getSortSpec().getSort(),0,40,rb.getFieldFlags());
+
+//        Set<String> fieldsSet = new HashSet<>();
+//        fieldsSet.add("score");
+//        fieldsSet.add("ID");
+//        fieldsSet.add("Campaign_id");
+//
+//        List<String> campingIdScorePair = Arrays.asList(solrParams.getParams("Campaign"));
+//        Log.info("extra param size: "+campingIdScorePair.size());
+//        Map<String,String> CampaignIdBoost = new HashMap<>();
+//
+//        campingIdScorePair.stream().forEach(x->{
+//            String[] pair = x.split(":");
+//            CampaignIdBoost.put(pair[0],pair[1]);
+//        });
+//
+//        CampaignIdBoost.entrySet().stream().forEach(
+//                c-> Log.info("Campaign params key: "+c.getKey()+" and value "+c.getValue()));
+//
+//        DocList initialDocList = rb.getResults().docList;
+//
+//        DocIterator iterator = initialDocList.iterator();
+//        Map<String, String> scoreMap = new HashMap<>();
+//
+//        Log.info("doc size: "+initialDocList.size());
+//
+//        //for distribuited search only
+//        //SolrDocumentList docList = rb.getResponseDocs();
+//
+//        for(int i = 0;i<initialDocList.size();i++)
+//        {
+//            try {
+//                int docId = iterator.nextDoc();
+//                SolrDocumentFetcher documentFetcher =  searcher.getDocFetcher();
+//                SolrDocument doc = new SolrDocument();
+//
+//                documentFetcher.decorateDocValueFields(doc, docId,fieldsSet);
+//                Document d = searcher.doc(docId,fieldsSet);
+//
+//                Log.info("doc campaign id "+doc.get("Campaign_id"));
+//                if (CampaignIdBoost.containsKey(String.valueOf(doc.get("Campaign_id")) )){
+//                   Double newScore = Double.valueOf(1)
+//                           * Double.valueOf(1.3);
+//                    doc.addField("newscore",newScore);
+//
+//                    Log.info("Doc id: "+d.getField("ID").name());
+//                    scoreMap.put(String.valueOf("new score"),String.valueOf(newScore));
+//                    Log.info("new Score: "+newScore);
+//                }
+//
+//            }catch (SolrException ex)
+//            {new score
+//                Log.error("Exception: "+ex.getMessage());
+//            }
+//        }
+//
+//
+        rb.rsp.add("group: ",grouped);
+        }
 
     public String getDescription() {
         return "CustomGroupingSearch";
@@ -137,11 +272,11 @@ public class CustomGroupingSearch extends SearchComponent  {
 
 
     public NamedList<Object> getStatistics(){
-        NamedList all = new SimpleOrderedMap<Object>();
-        all.add("requests",""+numRequests );
-        all.add("errors",""+numeErrors);
-        all.add("totalTime(ms)",""+totalRequestTime);
-        return all;
-    }
+        return null;
+   }
+
+   private class GroupObject {
+
+   }
 
 }
