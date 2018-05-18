@@ -1,19 +1,31 @@
 package rubrikk.solr;
+import com.google.common.collect.Sets;
+import com.google.common.primitives.Floats;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Sort;
 import org.apache.solr.common.SolrDocument;
+import org.apache.solr.common.SolrDocumentList;
+import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.MapSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.handler.component.SearchComponent;
+import org.apache.solr.response.BasicResultContext;
+import org.apache.solr.response.transform.DocIdAugmenterFactory;
+import org.apache.solr.response.transform.DocTransformer;
+import org.apache.solr.response.transform.ExplainAugmenterFactory;
+import org.apache.solr.response.transform.ValueAugmenterFactory;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.*;
+import org.apache.solr.update.DocumentBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -54,6 +66,9 @@ public class Deduplication extends SearchComponent {
         Set<String> uniqueIds = new HashSet<>();
         Set<String> duplicateIds = new HashSet<>();
 
+        Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
+        Set<String> fls = fields.stream().map(c->c.getName()).collect(Collectors.toSet());
+
         NamedList<String> dublications = new NamedList<>();
         //TODO verify for null
         for(int i = 0; i<initialDocList.size(); i++){
@@ -65,7 +80,7 @@ public class Deduplication extends SearchComponent {
                 SolrDocumentFetcher docFetcher =  searcher.getDocFetcher();
 
                 SolrDocument docBase = new SolrDocument();
-                docFetcher.decorateDocValueFields(docBase,docId,fieldSet);
+                docFetcher.decorateDocValueFields(docBase,docId,fls);
                 Map<String,Object> obj = docBase.getFieldValueMap();
                 String value = String.valueOf(obj.get(DUPLICATIONFIELD));
 
@@ -93,21 +108,22 @@ public class Deduplication extends SearchComponent {
         rb.req.setParams(new MapSolrParams(paramMap));
 
         List<Query> filters = rb.getFilters();
-
-        try {
-            QParser parser = QParser.getParser("-itemindex:(127178378 111193779)",rb.req);
-            if(filters == null)
-                filters = new ArrayList<>();
-            filters.add(parser.getQuery());
-        } catch (SyntaxError syntaxError) {
-            syntaxError.printStackTrace();
-        }
+//
+//        try {
+//            QParser parser = QParser.getParser("-itemindex:(127178378 111193779)",rb.req);
+//            if(filters == null)
+//                filters = new ArrayList<>();
+//            filters.add(parser.getQuery());
+//        } catch (SyntaxError syntaxError) {
+//            syntaxError.printStackTrace();
+//        }
 
         //rb.req.getSearcher().search(rb.getQuery(), Integer.valueOf(rows));
 
+
         Log.info("NamedList params: "+paramsNamedList);
 
-        //NamedList<Object> response = rb.rsp.getValues();
+        NamedList<Object> response = rb.rsp.getValues();
 
         Sort srt =rb.getSortSpec().getSort();
 
@@ -118,22 +134,74 @@ public class Deduplication extends SearchComponent {
 
         Log.info("Modified query"+rb.getQuery());
 
-        DocList docSet = searcher.getDocList(rb.getQuery(),filters,srt,0,rows,rb.getFieldFlags());
+        DocList docList = searcher.getDocList(rb.getQuery(),filters,srt,0,rows,rb.getFieldFlags());
+
+        List<Integer> ints = new ArrayList<>();
+        List<Float> flaots = new ArrayList<>();
+
+        CampaingScoreTransformFactory tran = new CampaingScoreTransformFactory();
+
+        NamedList<Float> data = new NamedList<>();
+        data.add("0",1.3f);
+        data.add("1",3.4f);
+        data.add("2",4f);
+
+        tran.init(data);
+        DocTransformer docTransformer= tran.create("qualityorderscore",params,rb.req);
+
+        SolrDocumentList solrDocumentList = new SolrDocumentList();
+
+        DocIterator docsetIterator = docList.iterator();
+        for(int i =0; i<docList.size(); i++){
+
+            SolrDocument docBase = new SolrDocument();
+            try {
+                int docId = docsetIterator.nextDoc();
+
+                Log.info("initialdocid: "+docId);
+
+                SolrDocumentFetcher docFetcher =  searcher.getDocFetcher();
+
+                docFetcher.decorateDocValueFields(docBase,docId,fls);
+                Map<String,Object> obj = docBase.getFieldValueMap();
+                Log.info("filds size "+obj.size());
 
 
+            }catch (IOException ex){
+                Log.error("Error: "+ex.getMessage());
+            }
 
-        DocIterator docsetIterator = docSet.iterator();
-        for(int i =0; i<docSet.size(); i++)
-        {
             int docsetid = docsetIterator.nextDoc();
+            if(docList.hasScores())
+             flaots.add(docsetIterator.score());
             Log.info("DocsetId: "+docsetid);
+            ints.add(docsetid);
+
+            docTransformer.transform(docBase,docsetid,docsetIterator.score());
+
+            solrDocumentList.add(docBase);
+
         }
+
+        Collections.sort(solrDocumentList, Comparator.comparing(o -> ((Float) o.getFieldValue("qualityorderscore"))));
+
+
+        Collections.reverse(solrDocumentList);
+
+
+        int[] ids = ints.stream().mapToInt(Number::intValue).toArray();
+        float[] scores = Floats.toArray(flaots);
+
+
+
+
+        DocSlice docSlice = new DocSlice(0,rows, ids,scores,0,0);
 
 //        for (int i = 0; i < response.size();i++)
 //        {
 //            if(response.getVal(i) instanceof BasicResultContext){
 //                BasicResultContext resultCont = (BasicResultContext)response.getVal(i);
-//                //response.remove(i);
+//                response.remove(i);
 //            Log.info("Response docList size: "+resultCont.getDocList().size());
 //            }
 //
@@ -145,7 +213,8 @@ public class Deduplication extends SearchComponent {
         //rb.rsp.setAllValues();
         rb.rsp.add("duplications: ",dublications);
         rb.rsp.add("unique: ",uniqueIds);
-        rb.rsp.add("new response",docSet);
+        rb.rsp.add("new response",docSlice);
+        rb.rsp.add("SolrDoc List",solrDocumentList);
     }
 
     @Override
@@ -162,5 +231,6 @@ public class Deduplication extends SearchComponent {
     public void registerMetricName(String name) {
 
     }
+
 }
 
