@@ -5,6 +5,7 @@ import org.apache.lucene.queries.function.valuesource.QueryValueSource;
 import org.apache.lucene.search.*;
 import org.apache.lucene.search.grouping.*;
 import org.apache.lucene.util.mutable.MutableValue;
+import org.apache.solr.handler.component.QueryComponent;
 import org.apache.solr.search.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

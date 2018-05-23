@@ -11,6 +11,7 @@ import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.MapSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
+import org.apache.solr.handler.component.QueryComponent;
 import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.handler.component.SearchComponent;
 import org.apache.solr.response.BasicResultContext;
@@ -20,6 +21,7 @@ import org.apache.solr.response.transform.ExplainAugmenterFactory;
 import org.apache.solr.response.transform.ValueAugmenterFactory;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.*;
+import org.apache.solr.search.grouping.distributed.command.QueryCommand;
 import org.apache.solr.update.DocumentBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -192,10 +194,7 @@ public class Deduplication extends SearchComponent {
         int[] ids = ints.stream().mapToInt(Number::intValue).toArray();
         float[] scores = Floats.toArray(flaots);
 
-
-
-
-        DocSlice docSlice = new DocSlice(0,rows, ids,scores,0,0);
+                DocSlice docSlice = new DocSlice(0,rows, ids,scores,0,0);
 
 //        for (int i = 0; i < response.size();i++)
 //        {

@@ -23,6 +23,9 @@ public class CampaingScoreTransformFactory extends TransformerFactory {
 
         Log.info("Args "+args.toString());
         campaigns=args.asShallowMap();
+        for (Map.Entry<String, Float> entr :campaigns.entrySet()) {
+            Log.info("Campaign key "+entr.getKey()+" campaign valeu "+entr.getValue());
+        }
     }
 
     @Override
@@ -47,9 +50,10 @@ public class CampaingScoreTransformFactory extends TransformerFactory {
             return name;
         }
 
-         public void transform(SolrDocument doc,float score,float positionScore){
+         public void transform(SolrDocument doc,float score,float positionScore,boolean boostCampaigns) {
 
              String docCampaignId = String.valueOf(doc.getFieldValue("Campaign_id"));
+             Log.info("campaign id in Tranform "+docCampaignId);
 
              Float docQualityBoost = ((Double)doc.getFieldValue("Quality_boost")).floatValue();
 
@@ -58,8 +62,11 @@ public class CampaingScoreTransformFactory extends TransformerFactory {
              if(!Float.valueOf(score).isNaN())
                 value *= score;
 
-             if(campaigns.containsKey(docCampaignId))
-                 value *= campaigns.get(docCampaignId);
+             if(boostCampaigns && campaigns.containsKey(docCampaignId))
+                 Log.info("Campaign boost "+campaigns.get(docCampaignId));
+
+                 //TODO this looks very weird
+                 value *= Float.valueOf(String.valueOf(campaigns.get(docCampaignId)));
 
              value*=positionScore;
 
