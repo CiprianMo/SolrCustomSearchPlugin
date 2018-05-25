@@ -118,8 +118,8 @@ public class CustomGroupingSearch extends SearchComponent
 
         prepareGrouping(rb, groupSpecs);
 
-        PerformGroupSearch(rb, searcher, queryResultFeatured, queryCommandFeatured, groupSpecs);
-        PerformGroupSearch(rb, searcher, queryResultNormal, queryCommandNormal, groupSpecs);
+        performGroupSearch(rb, searcher, queryResultFeatured, queryCommandFeatured, groupSpecs);
+        performGroupSearch(rb, searcher, queryResultNormal, queryCommandNormal, groupSpecs);
 
         SolrDocumentList solrDocumentListFeatured = getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryResultFeatured,true);
         solrDocumentListFeatured.setNumFound(solrDocumentListFeatured.size());
