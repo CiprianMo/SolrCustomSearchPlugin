@@ -1,7 +1,6 @@
 package rubrikk.solr;
 
 import org.apache.commons.lang.ArrayUtils;
-import org.apache.hadoop.io.Text;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.search.Query;
