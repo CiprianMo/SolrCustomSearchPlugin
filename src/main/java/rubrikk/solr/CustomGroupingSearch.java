@@ -109,7 +109,7 @@ public class CustomGroupingSearch extends SearchComponent
         QueryCommand queryCommandNormal = rb.createQueryCommand();
 
         if(filters != null)
-            filters.stream().filter(e->e.toString().contains("Campaign_id")).collect(Collectors.toList());
+            normalFilters = filters.stream().filter(e->!e.toString().contains("Campaign_id")).collect(Collectors.toList());
 
         queryCommandNormal.setFilterList(normalFilters);
 
