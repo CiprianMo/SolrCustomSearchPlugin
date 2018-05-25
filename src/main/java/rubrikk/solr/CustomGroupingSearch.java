@@ -1,6 +1,7 @@
 package rubrikk.solr;
 
 import org.apache.commons.lang.ArrayUtils;
+import org.apache.hadoop.io.Text;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.search.Query;
@@ -126,8 +127,8 @@ public class CustomGroupingSearch extends SearchComponent
         SolrDocumentList solrDocumentListNormal = getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryResultNormal,false);
         solrDocumentListNormal.setNumFound(solrDocumentListNormal.size());
 
-        Collections.sort(solrDocumentListFeatured,Collections.reverseOrder((o1,o2)-> Float.compare((Float)o1.getFieldValue(FIELD_TO_APPEND),(Float)o2.getFieldValue(FIELD_TO_APPEND))));
-        Collections.sort(solrDocumentListNormal,Collections.reverseOrder((o1,o2)-> Float.compare((Float)o1.getFieldValue(FIELD_TO_APPEND),(Float)o2.getFieldValue(FIELD_TO_APPEND))));
+        solrDocumentListFeatured.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
+        solrDocumentListNormal.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
 
         SolrDocumentList finalSolrDocList = appendResults(solrDocumentListFeatured,solrDocumentListNormal);
 
@@ -249,7 +250,7 @@ public class CustomGroupingSearch extends SearchComponent
         return  finalList;
     }
 
-    private void PerformGroupSearch(ResponseBuilder rb, SolrIndexSearcher searcher, QueryResult queryResult, QueryCommand queryCommand, GroupingSpecification groupSpecs) throws IOException
+    private void performGroupSearch(ResponseBuilder rb, SolrIndexSearcher searcher, QueryResult queryResult, QueryCommand queryCommand, GroupingSpecification groupSpecs) throws IOException
     {
         Grouping grouping = new Grouping(searcher,queryResult,queryCommand,false,0,false );
 
