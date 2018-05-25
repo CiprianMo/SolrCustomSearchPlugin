@@ -6,37 +6,37 @@ import org.apache.solr.common.util.NamedList;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.transform.DocTransformer;
 import org.apache.solr.response.transform.TransformerFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
 
 
-public class CampaingScoreTransformFactory extends TransformerFactory {
-    private static final Logger Log = LoggerFactory.getLogger(CampaingScoreTransformFactory.class);
+public class CampaignScoreTransformFactory extends TransformerFactory
+{
 
     private Map campaigns = new HashMap<>();
 
     @Override
-    public void init(NamedList args){
-
-        campaigns=args.asShallowMap();
+    public void init(NamedList args)
+    {
+        campaigns = args.asShallowMap();
     }
 
     @Override
-    public CampaignsScoreTransformer create(String field, SolrParams params, SolrQueryRequest req) {
+    public CampaignsScoreTransformer create(String field, SolrParams params, SolrQueryRequest req)
+    {
         return new CampaignsScoreTransformer(field,campaigns);
     }
 
-    class CampaignsScoreTransformer extends DocTransformer{
-
+    class CampaignsScoreTransformer extends DocTransformer
+    {
         final String name;
         final Map<String,Float> campaigns;
         private float value;
 
 
-        public CampaignsScoreTransformer(String name, Map<String,Float> campaigns) {
+        public CampaignsScoreTransformer(String name, Map<String,Float> campaigns)
+        {
             this.name = name;
             this.campaigns = campaigns;
         }
@@ -47,8 +47,8 @@ public class CampaingScoreTransformFactory extends TransformerFactory {
         }
 
 
-        public void transform(SolrDocument doc,float score,float positionScore,boolean boostCampaigns) {
-
+        public void transform(SolrDocument doc,float score,float positionScore,boolean boostCampaigns)
+        {
             String docCampaignId = String.valueOf(doc.getFieldValue("Campaign_id"));
 
             value = ((Double)doc.getFieldValue("Quality_boost")).floatValue();
@@ -61,18 +61,19 @@ public class CampaingScoreTransformFactory extends TransformerFactory {
                  //TODO this looks very weird
                 value *= Float.valueOf(String.valueOf(campaigns.get(docCampaignId)));
 
-            value*=positionScore;
+            value *= positionScore;
 
             doc.setField(name,value);
         }
 
-        protected void appendField(SolrDocument doc, String name, String value){
+        protected void appendField(SolrDocument doc, String name, String value)
+        {
             doc.setField(name,value);
         }
 
         @Override
-        public void transform(SolrDocument doc, int docid){
-
+        public void transform(SolrDocument doc, int docid)
+        {
             doc.setField(name,value);
         }
     }
