@@ -31,12 +31,12 @@ import java.util.stream.Collectors;
 public class CustomGroupingSearch extends SearchComponent
 {
     private static final String FIELD_TO_APPEND = "GroupOrderScore";
-    private static CampaignScoreTransformFactory TransformFactory;
-    private static boolean UseRubrikkGrouping=false;
-    private static float[] PlacementOrderScore;
+    private CampaignScoreTransformFactory transformFactory;
+    private boolean useRubrikkGrouping=false;
+    private float[] placementOrderScore;
 
-    private Integer Rows;
-    private Set<String> FieldList;
+    private Integer rows;
+    private Set<String> fieldList;
 
     //for stats
     volatile long totalRequestTime;
@@ -45,9 +45,9 @@ public class CustomGroupingSearch extends SearchComponent
     public void init(NamedList args){
 
         super.init(args);
-        List<Float> placementOrderScore = ((NamedList)args.get("placementScore")).getAll("score");
-        if(placementOrderScore !=null)
-            PlacementOrderScore = ArrayUtils.toPrimitive(placementOrderScore.toArray(new Float[0]));
+        List<Float> placementOrderScoreList = ((NamedList)args.get("placementScore")).getAll("score");
+        if(placementOrderScoreList !=null)
+            placementOrderScore = ArrayUtils.toPrimitive(placementOrderScoreList.toArray(new Float[0]));
     }
 
     public void prepare(ResponseBuilder rb) throws IOException {
@@ -55,14 +55,14 @@ public class CustomGroupingSearch extends SearchComponent
         SolrParams solrParams = rb.req.getParams();
 
         if(solrParams.getBool("RubrikkGrouping")!=null)
-            UseRubrikkGrouping = solrParams.getBool("RubrikkGrouping");
+            useRubrikkGrouping = solrParams.getBool("RubrikkGrouping");
 
-        Rows = solrParams.getInt(CommonParams.ROWS);
+        rows = solrParams.getInt(CommonParams.ROWS);
 
         Map<String,Object> mapParams = new HashMap<>();
         solrParams.toMap(mapParams);
 
-        TransformFactory = new CampaignScoreTransformFactory();
+        transformFactory = new CampaignScoreTransformFactory();
 
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -71,23 +71,23 @@ public class CustomGroupingSearch extends SearchComponent
 
             campaigns.add("0",1.0f);
 
-            TransformFactory.init(campaigns);
+            transformFactory.init(campaigns);
         }
 
         Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
-        FieldList = fields.stream().map(SchemaField::getName).collect(Collectors.toSet());
+        fieldList = fields.stream().map(SchemaField::getName).collect(Collectors.toSet());
     }
 
     public void process(ResponseBuilder rb) throws IOException {
 
         long lstartTime = System.currentTimeMillis();
 
-        if(!UseRubrikkGrouping){
+        if(!useRubrikkGrouping){
             totalRequestTime+=System.currentTimeMillis()-lstartTime;
             return;
         }
 
-        DocTransformer docTransformer = TransformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
+        DocTransformer docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
 
         SolrParams solrParams = rb.req.getParams();
 
@@ -108,13 +108,8 @@ public class CustomGroupingSearch extends SearchComponent
         QueryCommand queryCommandFeatured = rb.createQueryCommand();
         QueryCommand queryCommandNormal = rb.createQueryCommand();
 
-        if(filters !=null){
-            for(Query query:filters){
-                if(!query.toString().contains("Campaign_id")){
-                    normalFilters.add(query);
-                }
-            }
-        }
+        if(filters != null)
+            filters.stream().filter(e->e.toString().contains("Campaign_id")).collect(Collectors.toList());
 
         queryCommandNormal.setFilterList(normalFilters);
 
@@ -166,7 +161,7 @@ public class CustomGroupingSearch extends SearchComponent
                 groupSortSpec.getCount(),
                 groupSortSpec.getOffset());
         withinGroupSortStr.setOffset(0);
-        withinGroupSortStr.setCount(Rows);
+        withinGroupSortStr.setCount(rows);
 
         groupingSpec.setWithinGroupSortSpec(withinGroupSortStr);
         groupingSpec.setGroupSortSpec(groupSortSpec);
@@ -207,17 +202,17 @@ public class CustomGroupingSearch extends SearchComponent
             
             for(int i =0; i<docSlice.size(); i++)
             {
-                index = Math.min(index,PlacementOrderScore.length-1);
+                index = Math.min(index,placementOrderScore.length-1);
 
                 int docSetId = iterator.nextDoc();
 
                 SolrDocument docBase = new SolrDocument();
 
-                docFetcher.decorateDocValueFields(docBase,docSetId,FieldList);
+                docFetcher.decorateDocValueFields(docBase,docSetId,fieldList);
 
                 docBase.addField("score",iterator.score());
                 
-                Document doc = searcher.doc(i,FieldList);
+                Document doc = searcher.doc(i,fieldList);
 
                 for(IndexableField field:doc.getFields())
                 {
@@ -232,7 +227,7 @@ public class CustomGroupingSearch extends SearchComponent
                         docBase.addField(field.name(),fieldvalue);
                 }
 
-                docTransformer.transform(docBase,iterator.score(),PlacementOrderScore[index++],boostCampaigns);
+                docTransformer.transform(docBase,iterator.score(),placementOrderScore[index++],boostCampaigns);
 
                 String documentType = boostCampaigns ? "featured" : "normal";
 
@@ -248,8 +243,8 @@ public class CustomGroupingSearch extends SearchComponent
     {
         SolrDocumentList finalList = new SolrDocumentList();
 
-        finalList.addAll(featured.subList(0, Math.min(featured.size(),Rows) ) );
-        finalList.addAll(normal.subList(0, Math.min(normal.size(),Rows) ) );
+        finalList.addAll(featured.subList(0, Math.min(featured.size(),rows) ) );
+        finalList.addAll(normal.subList(0, Math.min(normal.size(),rows) ) );
 
         return  finalList;
     }
