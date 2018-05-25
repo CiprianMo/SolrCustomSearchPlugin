@@ -14,7 +14,7 @@ import java.util.Map;
 public class CampaignScoreTransformFactory extends TransformerFactory
 {
 
-    private Map campaigns = new HashMap<>();
+    private Map<String,Float> campaigns = new HashMap<>();
 
     @Override
     public void init(NamedList args)
@@ -30,8 +30,8 @@ public class CampaignScoreTransformFactory extends TransformerFactory
 
     class CampaignsScoreTransformer extends DocTransformer
     {
-        final String name;
-        final Map<String,Float> campaigns;
+        private final String name;
+        private final Map<String,Float> campaigns;
         private float value;
 
 
