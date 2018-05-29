@@ -23,6 +23,8 @@ import org.apache.solr.search.*;
 import org.apache.solr.search.grouping.GroupingSpecification;
 
 import org.codehaus.jackson.map.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
@@ -30,10 +32,13 @@ import java.util.stream.Collectors;
 
 public class CustomGroupingSearch extends SearchComponent
 {
+    private static final Logger Log = LoggerFactory.getLogger(CustomGroupingSearch.class);
     private static final String FIELD_TO_APPEND = "GroupOrderScore";
     private CampaignScoreTransformFactory transformFactory;
-    private boolean useRubrikkGrouping=false;
+    private boolean useRubrikkGrouping;
     private float[] placementOrderScore;
+
+    private List<String> campaignIds;
 
     private Integer rows;
     private Set<String> fieldList;
@@ -53,6 +58,7 @@ public class CustomGroupingSearch extends SearchComponent
     public void prepare(ResponseBuilder rb) throws IOException {
 
         SolrParams solrParams = rb.req.getParams();
+        useRubrikkGrouping = false;
 
         if(solrParams.getBool("RubrikkGrouping")!=null)
             useRubrikkGrouping = solrParams.getBool("RubrikkGrouping");
@@ -69,9 +75,8 @@ public class CustomGroupingSearch extends SearchComponent
         if(solrParams.get("Campaign") != null){
             NamedList campaigns = new NamedList<>(objectMapper.readValue(solrParams.get("Campaign"),HashMap.class));
 
-            campaigns.add("0",1.0f);
-
             transformFactory.init(campaigns);
+            campaignIds = new ArrayList<String>(campaigns.asShallowMap().keySet());
         }
 
         Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
@@ -81,15 +86,16 @@ public class CustomGroupingSearch extends SearchComponent
     public void process(ResponseBuilder rb) throws IOException {
 
         long lstartTime = System.currentTimeMillis();
-
+        Log.info("RubrikkGrouping "+useRubrikkGrouping);
         if(!useRubrikkGrouping){
+
             totalRequestTime+=System.currentTimeMillis()-lstartTime;
             return;
         }
 
-        DocTransformer docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
-
         SolrParams solrParams = rb.req.getParams();
+
+        DocTransformer docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
 
         Map<String,Object> mapParams = new HashMap<>();
         solrParams.toMap(mapParams);
@@ -99,39 +105,61 @@ public class CustomGroupingSearch extends SearchComponent
 
         SolrIndexSearcher searcher = rb.req.getSearcher();
 
-        List<Query> filters = rb.getFilters();
-        List<Query> normalFilters = new ArrayList<>();
+        //List<Query> filters = rb.getFilters();
+        List<Query> normalFilters = rb.getFilters().stream().filter(e->!e.toString().contains("Campaign_id")).collect(Collectors.toList());
 
         QueryResult queryResultFeatured = new QueryResult();
         QueryResult queryResultNormal = new QueryResult();
 
-        QueryCommand queryCommandFeatured = rb.createQueryCommand();
-        QueryCommand queryCommandNormal = rb.createQueryCommand();
+        QueryCommand queryCommandFeatured = rb.getQueryCommand();
+        QueryCommand queryCommandNormal = rb.getQueryCommand();
 
-        if(filters != null)
-            normalFilters = filters.stream().filter(e->!e.toString().contains("Campaign_id")).collect(Collectors.toList());
+        for(Query query: normalFilters)
+        {
+            Log.info("normal filter before: "+query.toString());
+        }
+
+        if(normalFilters != null)
+            for (String campaignId:campaignIds){
+
+                try {
+                    QParser q = QParser.getParser("Campaign_id:"+campaignId,rb.req);
+                    q.setIsFilter(true);
+
+                    boolean b=normalFilters.remove(q.getQuery());
+                    Log.info("Filter to remove "+q.getQuery().toString());
+                    Log.info("removed "+b);
+                } catch (SyntaxError syntaxError) {
+                    syntaxError.printStackTrace();
+                }
+            }
 
         queryCommandNormal.setFilterList(normalFilters);
+
+        for(Query query: queryCommandNormal.getFilterList())
+        {
+            Log.info("normal filter: "+query.toString());
+        }
 
         GroupingSpecification groupSpecs = new GroupingSpecification();
 
         prepareGrouping(rb, groupSpecs);
 
-        performGroupSearch(rb, searcher, queryResultFeatured, queryCommandFeatured, groupSpecs);
         performGroupSearch(rb, searcher, queryResultNormal, queryCommandNormal, groupSpecs);
 
+        performGroupSearch(rb, searcher, queryResultFeatured, queryCommandFeatured, groupSpecs);
+
+
         SolrDocumentList solrDocumentListFeatured = getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryResultFeatured,true);
-        solrDocumentListFeatured.setNumFound(solrDocumentListFeatured.size());
 
         SolrDocumentList solrDocumentListNormal = getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryResultNormal,false);
-        solrDocumentListNormal.setNumFound(solrDocumentListNormal.size());
 
         solrDocumentListFeatured.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
         solrDocumentListNormal.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
 
         SolrDocumentList finalSolrDocList = appendResults(solrDocumentListFeatured,solrDocumentListNormal);
 
-        finalSolrDocList.setNumFound(solrDocumentListFeatured.size()+solrDocumentListNormal.size());
+        finalSolrDocList.setNumFound(solrDocumentListFeatured.getNumFound()+solrDocumentListNormal.getNumFound());
 
         //Cleaning up the original response and replacing with our custom response
         NamedList<Object> response = rb.rsp.getValues();
@@ -145,7 +173,6 @@ public class CustomGroupingSearch extends SearchComponent
         rb.rsp.addResponse(finalSolrDocList);
         totalRequestTime+=System.currentTimeMillis()-lstartTime;
         }
-
 
     private void prepareGrouping(ResponseBuilder rb,GroupingSpecification groupingSpec) throws IOException
     {
@@ -163,9 +190,10 @@ public class CustomGroupingSearch extends SearchComponent
         withinGroupSortStr.setOffset(0);
         withinGroupSortStr.setCount(rows);
 
+
         groupingSpec.setWithinGroupSortSpec(withinGroupSortStr);
         groupingSpec.setGroupSortSpec(groupSortSpec);
-        String formatStr = "grouped";
+                String formatStr = "grouped";
         Grouping.Format responseFormat;
         try {
             responseFormat = Grouping.Format.valueOf(formatStr);
@@ -181,7 +209,7 @@ public class CustomGroupingSearch extends SearchComponent
 
         SolrDocumentFetcher docFetcher =  searcher.getDocFetcher();
 
-        SolrDocumentList solrDocumentListFeatured = new SolrDocumentList();
+        SolrDocumentList solrDocumentList = new SolrDocumentList();
 
         IndexSchema schema = searcher.getSchema();
 
@@ -190,6 +218,7 @@ public class CustomGroupingSearch extends SearchComponent
         Map domains = ((SimpleOrderedMap)grouped.get("domain")).asShallowMap();
 
         ArrayList<Object> groups = (ArrayList<Object>)domains.get("groups");
+        solrDocumentList.setNumFound(Long.valueOf(String.valueOf(domains.get("matches"))));
 
         for (Object group:groups)
         {
@@ -233,10 +262,10 @@ public class CustomGroupingSearch extends SearchComponent
 
                 docTransformer.appendField(docBase,"adType",documentType);
 
-                solrDocumentListFeatured.add(docBase);
+                solrDocumentList.add(docBase);
             }
         }
-        return solrDocumentListFeatured;
+        return solrDocumentList;
     }
 
     private SolrDocumentList appendResults(SolrDocumentList featured, SolrDocumentList normal)

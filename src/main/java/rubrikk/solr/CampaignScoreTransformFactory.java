@@ -7,6 +7,7 @@ import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.transform.DocTransformer;
 import org.apache.solr.response.transform.TransformerFactory;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -20,6 +21,7 @@ public class CampaignScoreTransformFactory extends TransformerFactory
     public void init(NamedList args)
     {
         campaigns = args.asShallowMap();
+
     }
 
     @Override
@@ -46,6 +48,10 @@ public class CampaignScoreTransformFactory extends TransformerFactory
             return name;
         }
 
+        @Override
+        public void transform(SolrDocument doc, int i, float v) throws IOException {
+            doc.setField(name,value);
+        }
 
         public void transform(SolrDocument doc,float score,float positionScore,boolean boostCampaigns)
         {
@@ -71,7 +77,7 @@ public class CampaignScoreTransformFactory extends TransformerFactory
             doc.setField(name,value);
         }
 
-        @Override
+
         public void transform(SolrDocument doc, int docid)
         {
             doc.setField(name,value);
