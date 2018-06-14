@@ -57,7 +57,12 @@ public class CampaignScoreTransformFactory extends TransformerFactory
         {
             String docCampaignId = String.valueOf(doc.getFieldValue("Campaign_id"));
 
-            value = ((Double)doc.getFieldValue("Quality_boost")).floatValue();
+            Float value;
+
+            if(doc.getFieldValue("Quality_boost")!=null)
+                value = ((Double) doc.getFieldValue("Quality_boost")).floatValue();
+            else
+                value = ((Double) doc.getFieldValue("quality")).floatValue();
 
             if(!Float.valueOf(score).isNaN())
                value *= score;

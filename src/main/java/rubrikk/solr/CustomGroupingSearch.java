@@ -3,47 +3,43 @@ package rubrikk.solr;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.Sort;
-
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
-import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.*;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SimpleOrderedMap;
-import org.apache.solr.handler.component.ResponseBuilder;
-import org.apache.solr.handler.component.SearchComponent;
-import org.apache.solr.response.BasicResultContext;
-import org.apache.solr.response.transform.DocTransformer;
+import org.apache.solr.handler.component.*;
 import org.apache.solr.schema.FieldType;
-import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.*;
-import org.apache.solr.search.grouping.GroupingSpecification;
 
 import org.codehaus.jackson.map.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
+
 import java.util.stream.Collectors;
 
-public class CustomGroupingSearch extends SearchComponent
+import static java.lang.Integer.parseInt;
+
+public class CustomGroupingSearch extends QueryComponent
 {
     private static final Logger Log = LoggerFactory.getLogger(CustomGroupingSearch.class);
     private static final String FIELD_TO_APPEND = "GroupOrderScore";
-    private CampaignScoreTransformFactory transformFactory;
-    private boolean useRubrikkGrouping;
-    private float[] placementOrderScore;
+    private static final String RUBRIKK_GROUPING = "RubrikkGrouping";
 
-    private List<String> campaignIds;
+    private boolean useRubrikkGrouping = false;
+
+    private float[] placementOrderScore;
+    private CampaignScoreTransformFactory transformFactory;
+    private CampaignScoreTransformFactory.CampaignsScoreTransformer docTransformer;
+    private List<Integer> campaignIds;
 
     private Integer rows;
-    private Integer withinGroupRows = 1;
+    private Integer withinGroupRows = 24;
     private Set<String> fieldList;
 
     //for stats
@@ -60,325 +56,462 @@ public class CustomGroupingSearch extends SearchComponent
 
     public void prepare(ResponseBuilder rb) throws IOException {
 
-        SolrParams solrParams = rb.req.getParams();
         useRubrikkGrouping = false;
 
-        if(solrParams.getBool("RubrikkGrouping")!=null)
-            useRubrikkGrouping = solrParams.getBool("RubrikkGrouping");
+        SolrParams solrParams = rb.req.getParams();
+
+        rows = solrParams.getInt(CommonParams.ROWS);
+
+        if(solrParams.getBool(RUBRIKK_GROUPING)!=null)
+            useRubrikkGrouping = solrParams.getBool(RUBRIKK_GROUPING);
+
+        if(!useRubrikkGrouping || (rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true )){
+            super.prepare(rb);
+            return;
+        }
+
+///TODO take in cosideration that users might also specify grouping params
+//        if(solrParams.getBool(GroupParams.GROUP)!=null){
+//            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+//                    "Solr Grouping not supported");
+//        }
 
         if(solrParams.getInt("RubrikkGrouping.limit") !=null)
             withinGroupRows = solrParams.getInt("RubrikkGrouping.limit");
 
-        rows = solrParams.getInt(CommonParams.ROWS);
+        NamedList params = solrParams.toNamedList();
 
-        Map<String,Object> mapParams = new HashMap<>();
-        solrParams.toMap(mapParams);
+        parseNormalParams(params);
+
+        Map<String,Object> mappedParams = params.asShallowMap();
+
+        rb.req.setParams(new MapSolrParams(mappedParams.entrySet().stream()
+                .collect(Collectors.toMap(x-> x.getKey(), x-> String.valueOf(x.getValue())))));
 
         transformFactory = new CampaignScoreTransformFactory();
 
         ObjectMapper objectMapper = new ObjectMapper();
 
+        campaignIds = new ArrayList<>();
+
         if(solrParams.get("Campaign") != null){
             NamedList campaigns = new NamedList<>(objectMapper.readValue(solrParams.get("Campaign"),HashMap.class));
 
             transformFactory.init(campaigns);
-            campaignIds = new ArrayList<String>(campaigns.asShallowMap().keySet());
+            Set<String> idsString = campaigns.asShallowMap().keySet();
+            campaignIds = new ArrayList<>(idsString.stream().map(o-> parseInt((o))).collect(Collectors.toSet()));
         }
 
+        docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
 
         fieldList = new HashSet<>();
         fieldList.add("ID");
-
     }
 
     public void process(ResponseBuilder rb) throws IOException {
 
         long lstartTime = System.currentTimeMillis();
-        Log.debug("RubrikkGrouping "+useRubrikkGrouping);
-        if(!useRubrikkGrouping){
 
+        if(!useRubrikkGrouping || (rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true )){
             totalRequestTime+=System.currentTimeMillis()-lstartTime;
+            super.process(rb);
             return;
         }
 
-        SolrParams solrParams = rb.req.getParams();
+        NamedList params = rb.req.getParams().toNamedList();
 
-        DocTransformer docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
+        Map<String,SolrParams> allSolrParams = new HashMap<>();
 
-        Map<String,Object> mapParams = new HashMap<>();
-        solrParams.toMap(mapParams);
+        allSolrParams.put("normal",SolrParams.toSolrParams(params));
 
-        rb.req.setParams(new MapSolrParams(mapParams.entrySet().stream()
-                .collect(Collectors.toMap(x-> x.getKey(), x-> String.valueOf(x.getValue())))));
+        if(!campaignIds.isEmpty()) {
 
-        SolrIndexSearcher searcher = rb.req.getSearcher();
+            NamedList featuredParams = addFeaturedParams(params,campaignIds);
 
-        QueryCommand queryCommandFeatured = rb.getQueryCommand();
-        QueryCommand queryCommandNormal = rb.getQueryCommand();
-
-        List<Query> normalFilters = rb.getFilters().stream().filter(e->!e.toString().contains("Campaign_id")).collect(Collectors.toList());
-        queryCommandNormal.setFilterList(normalFilters);
-
-        for(Query query: queryCommandNormal.getFilterList())
-        {
-            Log.debug("normal filter: "+query.toString());
+            allSolrParams.put("featured",SolrParams.toSolrParams(featuredParams));
         }
 
-        GroupingSpecification groupSpecs = new GroupingSpecification();
+        Set<Integer> docIds = new HashSet<>();
 
-        prepareGrouping(rb, groupSpecs);
+        if (allSolrParams.size() > 1){
 
-        totalRequestTime+=System.currentTimeMillis()-lstartTime;
-        Log.debug("Time before grouping: "+totalRequestTime);
+            allSolrParams.entrySet().stream().forEach(paramEntry->{
 
-        CompletableFuture<QueryResult> queryResultFeatureFuture = CompletableFuture.supplyAsync(()->{
-            try {
-                return performGroupSearch(rb, searcher, queryCommandFeatured, groupSpecs);
-            } catch (IOException e) {
-                e.printStackTrace();
-                return null;
-            }
-        });
+                rb.req.setParams(paramEntry.getValue());
+                try {
+                    processQuery(rb,paramEntry.getKey());
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
 
-        CompletableFuture<SolrDocumentList> solrDocumentListFeaturedFuture = queryResultFeatureFuture.thenApply( queryR->{
-            try {
-                return getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryR,true);
-            } catch (IOException e) {
-                e.printStackTrace();
-                return null;
-            }
-        });
-
-        CompletableFuture<SolrDocumentList> solrDocumentListFeaturedSorted = solrDocumentListFeaturedFuture.thenApply(list ->{
-                list.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
-                return list;
+                if (rb.getResults() != null) { // if last query returned any results
+                    docIds.addAll(getDocIdsSet(rb.getResults().docList));
+                }
             });
+        }
+        else{
 
-        CompletableFuture<QueryResult> queryResultNormalFuture = CompletableFuture.supplyAsync(()->{
+            Map.Entry<String,SolrParams> paramEntry = allSolrParams.entrySet().iterator().next();
+
+            rb.req.setParams(paramEntry.getValue());
             try {
-                return performGroupSearch(rb, searcher, queryCommandNormal, groupSpecs);
+                processQuery(rb,paramEntry.getKey());
             } catch (IOException e) {
                 e.printStackTrace();
-                return null;
             }
-        });
 
-        CompletableFuture<SolrDocumentList> solrDocumentListNormalFuture = queryResultNormalFuture.thenApply( queryR-> {
-            try {
-                return getSolrDocuments((CampaignScoreTransformFactory.CampaignsScoreTransformer) docTransformer, searcher, queryR,false);
-            } catch (IOException e) {
-                e.printStackTrace();
-                return null;
+            if (rb.getResults() != null) { // if last query returned any results
+                docIds.addAll(getDocIdsSet(rb.getResults().docList));
             }
-        });
-
-        CompletableFuture<SolrDocumentList> solrDocumentListNormalFutureSorted = solrDocumentListNormalFuture.thenApply(list->{
-            list.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
-            return list;
-        });
-
-        CompletableFuture<SolrDocumentList> combinedResultFuture =  solrDocumentListFeaturedSorted.thenCombine(solrDocumentListNormalFutureSorted,(featured,normal)->{
-            Long numfound = featured.getNumFound() + normal.getNumFound();
-            SolrDocumentList finalList = appendResults(featured,normal);
-            finalList.setNumFound(numfound);
-            return finalList;
-        });
-
-        SolrDocumentList finalSolrDocList = null;
-
-        try {
-            finalSolrDocList = combinedResultFuture.get();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        } catch (ExecutionException e) {
-            e.printStackTrace();
         }
-        totalRequestTime+=System.currentTimeMillis()-lstartTime;
-        Log.debug("Time after grouping: "+totalRequestTime);
 
-        Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
-        Set<String>remainingFields= fields.stream().map(SchemaField::getName).collect(Collectors.toSet());
 
-        fillUpDocs(finalSolrDocList,remainingFields,searcher);
+        createResponse(rb);
 
         totalRequestTime+=System.currentTimeMillis()-lstartTime;
-        Log.debug("Time after filling up data: "+totalRequestTime);
+    }
 
-        //Cleaning up the original response and replacing with our custom response
-        NamedList<Object> response = rb.rsp.getValues();
-        for (int i = 0; i < response.size();++i)
+    public NamedList addFeaturedParams(NamedList params, List<Integer> campaignIds){
+
+        NamedList featured = new NamedList(params.asShallowMap());
+        String campaignFilter = new String();
+
+
+        for(int campaignid: campaignIds){
+            campaignFilter+="Campaign_id:["+campaignid+" TO "+campaignid+"] OR ";
+        }
+
+        if(campaignFilter.endsWith(" OR ")){
+            campaignFilter=campaignFilter.substring(0,campaignFilter.length()-4);
+        }
+
+        Object fqs = featured.get(CommonParams.FQ);
+
+        if(fqs instanceof String[])
         {
-            if(response.getVal(i) instanceof BasicResultContext){
-                response.remove(i);
+            List<String> filters = Arrays.asList((String[])fqs);
+            String fqList = new String();
+            for (String filter :filters){
+                fqList+=filter+" AND ";
+            }
+
+            if(fqList.endsWith(" AND ")){
+                fqList=fqList.substring(0,fqList.length()-5);
+            }
+
+            if (!campaignFilter.isEmpty()){
+
+                String newFqs = fqList+" AND "+"("+campaignFilter+")";
+                featured.remove(CommonParams.FQ);
+                featured.add(CommonParams.FQ,newFqs);
+            }
+        }
+        if(fqs instanceof String){
+
+            if (!campaignFilter.isEmpty()){
+
+                String newFqs = fqs+" AND "+"("+campaignFilter+")";
+                featured.remove(CommonParams.FQ);
+                featured.add(CommonParams.FQ,newFqs);
+            }
+        }
+        else {
+            Log.info("No original filters");
+            if(!campaignFilter.isEmpty())
+            {
+                featured.add(CommonParams.FQ,campaignFilter);
             }
         }
 
-        rb.rsp.addResponse(finalSolrDocList);
-        totalRequestTime+=System.currentTimeMillis()-lstartTime;
-        Log.debug("End time: "+totalRequestTime);
+        return featured;
     }
 
-    private void fillUpDocs (SolrDocumentList docList, Set<String> fields,SolrIndexSearcher searcher) throws IOException {
-        SolrDocumentFetcher docFetcher =  searcher.getDocFetcher();
+    public void parseNormalParams(NamedList params){
 
-        for(int i =0; i<docList.size(); i++)
+        params.remove("Campaign");
+        params.remove(RUBRIKK_GROUPING);
+
+        Object fqParams = params.get(CommonParams.FQ);
+
+        if(fqParams instanceof String[])
         {
-            SolrDocument docBase = docList.get(i);
-            int docId = (Integer) docBase.getFieldValue("luceneId");
-            docFetcher.decorateDocValueFields(docBase,docId,fields);
+            List<String> filters = Arrays.asList((String[])params.get(CommonParams.FQ));
+            String fqList = new String();
+            for (String filter :filters){
+                fqList+=filter+" AND ";
+            }
+
+            if(fqList.endsWith(" AND ")){
+                fqList=fqList.substring(0,fqList.length()-5);
+            }
+            params.remove(CommonParams.FQ);
+            params.add(CommonParams.FQ,fqList);
         }
+
+        List<String> fls;
+
+        if(params.get(CommonParams.FL) instanceof String[]){
+
+            fls = new ArrayList<>(Arrays.asList((String[])params.get(CommonParams.FL)));
+
+        }
+        else{
+            String flsString = (String)params.get(CommonParams.FL);
+            String[] fields = flsString.split("[,\\s]+");
+            fls = new ArrayList<>(Arrays.asList(fields));
+        }
+
+        if(!fls.contains("score")){
+            fls.add("score");
+            params.remove(CommonParams.FL);
+            params.add(CommonParams.FL,String.join(", ",fls));
+        }
+
+        params.add(GroupParams.GROUP,true);
+        params.add(GroupParams.GROUP_FIELD,"domain");
+        params.add(GroupParams.GROUP_FORMAT,"grouped");
+        params.add(GroupParams.GROUP_LIMIT,withinGroupRows);
     }
 
-    private void prepareGrouping(ResponseBuilder rb,GroupingSpecification groupingSpec) throws IOException
-    {
-        SolrIndexSearcher searcher = rb.req.getSearcher();
+    protected void processQuery(ResponseBuilder rb,String searchMethod) throws IOException {
+        rb.setQuery(null);
+        rb.setQueryString(null);
 
-        final SortSpec sortSpec = rb.getSortSpec();
+        super.prepare(rb);
+        super.process(rb);
+        Object data = rb.rsp.getValues().get("grouped");
 
-        final SortSpec groupSortSpec = searcher.weightSortSpec(sortSpec, Sort.RELEVANCE);
-
-        SortSpec withinGroupSortStr = new SortSpec(
-                groupSortSpec.getSort(),
-                groupSortSpec.getSchemaFields(),
-                groupSortSpec.getCount(),
-                groupSortSpec.getOffset());
-        withinGroupSortStr.setOffset(0);
-        withinGroupSortStr.setCount(withinGroupRows);
-
-        groupingSpec.setWithinGroupSortSpec(withinGroupSortStr);
-        groupingSpec.setGroupSortSpec(groupSortSpec);
-                String formatStr = "grouped";
-        Grouping.Format responseFormat;
-        try {
-            responseFormat = Grouping.Format.valueOf(formatStr);
-        } catch (IllegalArgumentException e) {
-            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, String.format(Locale.ROOT, "Illegal %s parameter", GroupParams.GROUP_FORMAT));
+        NamedList grouped = (NamedList) data;
+        if(grouped !=null){
+            grouped.add("SearchMethod",searchMethod);
         }
-        groupingSpec.setResponseFormat(responseFormat);
-        groupingSpec.setFields(new String[]{"domain"});
-        groupingSpec.setNeedScore((rb.getFieldFlags() & SolrIndexSearcher.GET_SCORES) != 0);
+        rb.rsp.getValues().remove("grouped");
+
+        rb.rsp.add("result",grouped);
     }
 
-    private SolrDocumentList getSolrDocuments(CampaignScoreTransformFactory.CampaignsScoreTransformer docTransformer, SolrIndexSearcher searcher, QueryResult queryResultFeatured, boolean boostCampaigns) throws IOException {
+    private Set<Integer> getDocIdsSet(DocList docList) {
+        Set<Integer> docIds = new HashSet<>();
+        if (docList !=null){
+            DocIterator itr = docList.iterator();
+            while (itr.hasNext()) {
+                docIds.add(itr.next());
+            }
+        }
+        return docIds;
+    }
+    private void createResponse(ResponseBuilder rb) throws IOException {
+
+        Set<String> fields = new HashSet<>();
+        fields.add("quality");
+        fields.add("ID");
 
         Set<String> docValFields = new HashSet<>();
         docValFields.add("Campaign_id");
         docValFields.add("Quality_boost");
         docValFields.add("domain");
+        docValFields.add("quality");
 
-        SolrDocumentFetcher docFetcher =  searcher.getDocFetcher();
+        NamedList response = rb.rsp.getValues();
+
+        List<Integer> allDocIds = new ArrayList<Integer>();
+        List<Float> allScores = new ArrayList<Float>();
+        // we will have multiple responses if we execute multiple QueryComponents
+        // aggregate all results from all responses and prepare one final result to
+        // return to client
+        int res =0;
+        SolrDocumentList result = new SolrDocumentList();
+        for (int i = 0; i < response.size();i++) {
+            if (response.getName(i) == "result") {
+                res++;
+                SolrDocumentList groupedResult = parseGroupedResults(response.getVal(i),rb,docValFields);
+
+                groupedResult.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
+
+                List<SolrDocument > d = groupedResult.stream().filter(o->(Integer)o.getFieldValue("Campaign_id")>0).collect(Collectors.toList());
+
+                if(groupedResult != null && groupedResult.size()>0){
+                    result.addAll(groupedResult.subList(0, Math.min(rows,groupedResult.size())));
+                }
+                result.setNumFound(groupedResult.getNumFound());
+            }
+        }
+
+        while(response.get("result")!=null){
+            response.remove("result");
+        }
+
+        fillUpDocs(result,rb,docValFields);
+        response.add("response", result);
+    }
+
+    private void deDuplicateBasedOnQuality(SolrDocumentList list){
+
+        SolrDocumentList distinctList = new SolrDocumentList();
+        if(list!=null)
+        {
+            for (int i = 0; i < list.size(); i++) {
+                SolrDocument doc = list.get(i);
+
+                for(int j =0; j<distinctList.size(); j++){
+                    if(doc.getFieldValue("Duplicate_grp_id").equals(distinctList.get(j).getFieldValue("Duplicate_grp_id"))){
+                        SolrDocument d = distinctList.get(j);
+                        d=doc;
+                    }
+                }
+                Optional<SolrDocument> d = distinctList.stream().filter(o->o.getFieldValue("Duplicate_grp_id").equals(doc.getFieldValue("Duplicate_grp_id"))).findAny();
+                if (d.isPresent()){
+                    SolrDocument dc = d.get();
+                    if((Float)dc.getFieldValue("quality") < (Float)doc.getFieldValue("quality")){
+                        dc = doc;
+                    }
+                }else
+                    distinctList.add(doc);
+
+            }
+        }
+    }
+
+    private SolrDocumentList parseGroupedResults(Object data,ResponseBuilder rb, Set<String> docValFields){
 
         SolrDocumentList solrDocumentList = new SolrDocumentList();
 
-        IndexSchema schema = searcher.getSchema();
+        NamedList grouped = (NamedList) data;
+        if(data !=null){
+            NamedList domains = (NamedList)grouped.get("domain");
+            String searchMethod = (String)grouped.get("SearchMethod");
 
-        Map grouped = ((SimpleOrderedMap) queryResultFeatured.groupedResults).asShallowMap();
+            ArrayList<Object> groups = (ArrayList<Object>)domains.get("groups");
+            solrDocumentList.setNumFound(Long.valueOf(String.valueOf(domains.get("matches"))));
 
-        Map domains = ((SimpleOrderedMap)grouped.get("domain")).asShallowMap();
+            for(Object group:groups){
+                if (group !=null){
 
-        ArrayList<Object> groups = (ArrayList<Object>)domains.get("groups");
-        solrDocumentList.setNumFound(Long.valueOf(String.valueOf(domains.get("matches"))));
+                    DocSlice docSlice = (DocSlice)((SimpleOrderedMap)group).get("doclist");
 
-        for (Object group:groups)
-        {
-
-            DocSlice docSlice = (DocSlice)((SimpleOrderedMap)group).get("doclist");
-
-            int index = 0;
-
-            DocIterator iterator = docSlice.iterator();
-            
-            for(int i =0; i<docSlice.size(); i++)
-            {
-                index = Math.min(index,placementOrderScore.length-1);
-
-                int docSetId = iterator.nextDoc();
-
-                SolrDocument docBase = new SolrDocument();
-
-                docFetcher.decorateDocValueFields(docBase,docSetId,docValFields);
-
-                docBase.addField("score",iterator.score());
-                docBase.addField("luceneId",docSetId);
-
-                Document doc = searcher.doc(docSetId,fieldList);
-
-                for(IndexableField field:doc.getFields())
-                {
-                    FieldType type = schema.getFieldType(field.name());
-
-                    Object fieldvalue = type.toObject(field);
-
-                    if (fieldvalue instanceof UUID)
-                        docBase.addField(field.name(),field.stringValue());
-
-                    else
-                        docBase.addField(field.name(),fieldvalue);
+                    parseGroup(docSlice,rb,searchMethod, solrDocumentList,docValFields);
                 }
-
-                docTransformer.transform(docBase,iterator.score(),placementOrderScore[index++],boostCampaigns);
-
-                String documentType = boostCampaigns ? "featured" : "normal";
-
-                docTransformer.appendField(docBase,"adType",documentType);
-
-                solrDocumentList.add(docBase);
             }
         }
+
         return solrDocumentList;
     }
 
-    private SolrDocumentList appendResults(SolrDocumentList featured, SolrDocumentList normal)
-    {
-        SolrDocumentList finalList = new SolrDocumentList();
+    private SolrDocumentList parseGroup(DocSlice docSlice, ResponseBuilder rb, String searchMethod,SolrDocumentList docList, Set<String> docValFields){
 
-        finalList.addAll(featured.subList(0, Math.min(featured.size(),rows) ) );
-        finalList.addAll(normal.subList(0, Math.min(normal.size(),rows) ) );
+        int index = 0;
+        DocIterator iterator = docSlice.iterator();
 
-        return  finalList;
+        SolrDocumentFetcher docFetcher =  rb.req.getSearcher().getDocFetcher();
+        for(int i =0; i<docSlice.size(); i++){
+            index = Math.min(index,placementOrderScore.length-1);
+
+            int docSetId = iterator.nextDoc();
+
+            SolrDocument docBase = new SolrDocument();
+            try {
+                docFetcher.decorateDocValueFields(docBase,docSetId,docValFields);
+            } catch (IOException e) {
+                Log.error("DecoradeDocValues "+e.getMessage());
+            }
+
+            docBase.addField("score",iterator.score());
+            docBase.addField("luceneId",docSetId);
+
+            Document doc = null;
+            try {
+                doc = rb.req.getSearcher().doc(docSetId,fieldList);
+            } catch (IOException e) {
+                Log.error("getting doc data "+e.getMessage());
+            }
+
+            for(IndexableField field:doc.getFields()) {
+                FieldType type = rb.req.getSchema().getFieldType(field.name());
+
+                Object fieldvalue = type.toObject(field);
+
+                if (fieldvalue instanceof UUID)
+                    docBase.addField(field.name(), field.stringValue());
+
+                else
+                    docBase.addField(field.name(), fieldvalue);
+            }
+
+            docTransformer.transform(docBase,iterator.score(),placementOrderScore[index++],(searchMethod=="featured"));
+
+            docTransformer.appendField(docBase,"SearchMethod",searchMethod);
+
+            docList.add(docBase);
+        }
+
+        return docList;
     }
 
-    private QueryResult performGroupSearch(ResponseBuilder rb, SolrIndexSearcher searcher, QueryCommand queryCommand, GroupingSpecification groupSpecs) throws IOException
-    {
-        QueryResult queryResult = new QueryResult();
-        Grouping grouping = new Grouping(searcher,queryResult,queryCommand,false,0,false );
-
-        grouping.setGroupSort(rb.getSortSpec().getSort())
-                .setWithinGroupSort(groupSpecs.getWithinGroupSortSpec().getSort())
-                .setDefaultFormat(groupSpecs.getResponseFormat())
-                .setLimitDefault(queryCommand.getLen())
-                .setDocsPerGroupDefault(groupSpecs.getWithinGroupSortSpec().getCount())
-                .setGroupOffsetDefault(0)
-                .setGetGroupedDocSet(groupSpecs.isTruncateGroups());
-
-        try {
-            grouping.addFieldCommand("domain", rb.req);
+    private void extractDocDetails(List<Integer> allDocIds, List<Float> allScores, DocList resultContext) {
+        DocIterator itr = resultContext.iterator();
+        while (itr.hasNext()) {
+            int nextDocId = itr.nextDoc();
+            if (!allDocIds.contains(nextDocId)) { // we want to retain unique results
+                allDocIds.add(nextDocId);
+                if (resultContext.hasScores()) {
+                    allScores.add(itr.score());
+                } else {
+                    allScores.add(0.0f);
+                }
+            }
         }
-        catch (SyntaxError syntaxError)
+    }
+
+    private void fillUpDocs (SolrDocumentList docList,ResponseBuilder rb,Set<String> docValFields) throws IOException {
+
+        Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
+
+
+        String fl = rb.req.getParams().get(CommonParams.FL);
+
+        Set<String> remainingFields = new HashSet<>();
+        if(fl.equals("*,score") || fl.equals("*")){
+
+            remainingFields = fields.stream().map(SchemaField::getName).filter(o-> !docValFields.contains(o)).collect(Collectors.toSet());
+        }
+        else
         {
-            syntaxError.printStackTrace();
+            List<String>requestedFields = new ArrayList<>(Arrays.asList(fl.split("[,\\s]+")));
+
+            if(! requestedFields.isEmpty() )
+            {
+                remainingFields = requestedFields.stream().filter(o-> !docValFields.contains(o)).collect(Collectors.toSet());
+            }
         }
 
-        if( rb.isNeedDocList() || rb.isDebug() ){
-            queryCommand.setFlags(SolrIndexSearcher.GET_DOCLIST);
+        fields.remove("ID");
+
+        //Log.info("Contians ID: "+fields.contains("ID"));
+
+        //for (String field : fields)
+        //Log.info("field name to fill: "+field);
+
+        SolrDocumentFetcher docFetcher =  rb.req.getSearcher().getDocFetcher();
+
+        for(int i =0; i<docList.size(); i++)
+        {
+            SolrDocument docBase = docList.get(i);
+            int docId = (Integer) docBase.getFieldValue("luceneId");
+            docFetcher.decorateDocValueFields(docBase,docId,remainingFields);
         }
-
-        //TODO check if this fist of second pass score
-        queryCommand.setFlags(SolrIndexSearcher.GET_SCORES);
-        grouping.execute();
-
-        return queryResult;
     }
 
     public String getDescription() {
         return "CustomGroupingSearch";
     }
 
-    @Override
+
     public NamedList<Object> getStatistics(){
         NamedList stats = new SimpleOrderedMap<Object>();
         stats.add("Custom stats totalTime(ms)",""+totalRequestTime);
         return stats;
-   }
+    }
+
 }
+
 
