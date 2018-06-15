@@ -1,5 +1,6 @@
 package rubrikk.solr;
 
+import com.google.protobuf.MapEntry;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
@@ -48,15 +49,16 @@ public class CustomGroupingSearch extends QueryComponent
     @Override
     public void init(NamedList args){
 
-        super.init(args);
         List<Float> placementOrderScoreList = ((NamedList)args.get("placementScore")).getAll("score");
         if(placementOrderScoreList !=null)
             placementOrderScore = ArrayUtils.toPrimitive(placementOrderScoreList.toArray(new Float[0]));
     }
 
+    @Override
     public void prepare(ResponseBuilder rb) throws IOException {
 
         useRubrikkGrouping = false;
+
 
         SolrParams solrParams = rb.req.getParams();
 
@@ -65,8 +67,11 @@ public class CustomGroupingSearch extends QueryComponent
         if(solrParams.getBool(RUBRIKK_GROUPING)!=null)
             useRubrikkGrouping = solrParams.getBool(RUBRIKK_GROUPING);
 
+        if(rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true){
+            Log.info("is sharded");
+        }
+
         if(!useRubrikkGrouping || (rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true )){
-            super.prepare(rb);
             return;
         }
 
@@ -108,13 +113,13 @@ public class CustomGroupingSearch extends QueryComponent
         fieldList.add("ID");
     }
 
+    @Override
     public void process(ResponseBuilder rb) throws IOException {
 
         long lstartTime = System.currentTimeMillis();
 
         if(!useRubrikkGrouping || (rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true )){
             totalRequestTime+=System.currentTimeMillis()-lstartTime;
-            super.process(rb);
             return;
         }
 
@@ -135,7 +140,7 @@ public class CustomGroupingSearch extends QueryComponent
 
         if (allSolrParams.size() > 1){
 
-            allSolrParams.entrySet().stream().forEach(paramEntry->{
+            allSolrParams.entrySet().stream().parallel().forEach(paramEntry->{
 
                 rb.req.setParams(paramEntry.getValue());
                 try {
@@ -231,22 +236,56 @@ public class CustomGroupingSearch extends QueryComponent
         params.remove("Campaign");
         params.remove(RUBRIKK_GROUPING);
 
-        Object fqParams = params.get(CommonParams.FQ);
-
-        if(fqParams instanceof String[])
-        {
-            List<String> filters = Arrays.asList((String[])params.get(CommonParams.FQ));
-            String fqList = new String();
-            for (String filter :filters){
-                fqList+=filter+" AND ";
+        for (int i =0;i < params.size(); i++){
+            if(params.getVal(i) instanceof String[])
+            {
+                List<String> paramsList = Arrays.asList((String[])params.getVal(i));
+                String paramsString = new String();
+                for(String param: paramsList){
+                    paramsString+= param+" AND ";
+                }
+                if(paramsString.endsWith(" AND ")){
+                    paramsString = paramsString.substring(0,paramsString.length()-5);
+                }
+                params.setVal(i,paramsString);
             }
-
-            if(fqList.endsWith(" AND ")){
-                fqList=fqList.substring(0,fqList.length()-5);
-            }
-            params.remove(CommonParams.FQ);
-            params.add(CommonParams.FQ,fqList);
         }
+
+//        Log.info("Params: "+params.toString());
+//
+//        Object fqParams = params.get(CommonParams.FQ);
+//
+//        if(fqParams instanceof String[])
+//        {
+//            List<String> filters = Arrays.asList((String[])params.get(CommonParams.FQ));
+//            String fqList = new String();
+//            for (String filter :filters){
+//                fqList+=filter+" AND ";
+//            }
+//
+//            if(fqList.endsWith(" AND ")){
+//                fqList=fqList.substring(0,fqList.length()-5);
+//            }
+//            params.remove(CommonParams.FQ);
+//            params.add(CommonParams.FQ,fqList);
+//        }
+//
+//        Object bqParams = params.get("bq");
+//
+//        if(bqParams instanceof String[])
+//        {
+//            List<String> bqs = Arrays.asList((String[])params.get("bq"));
+//            String fqList = new String();
+//            for (String filter :bqs){
+//                fqList+=filter+" AND ";
+//            }
+//
+//            if(fqList.endsWith(" AND ")){
+//                fqList=fqList.substring(0,fqList.length()-5);
+//            }
+//            params.remove("bq");
+//            params.add("bq",fqList);
+//        }
 
         List<String> fls;
 
@@ -300,6 +339,7 @@ public class CustomGroupingSearch extends QueryComponent
         }
         return docIds;
     }
+
     private void createResponse(ResponseBuilder rb) throws IOException {
 
         Set<String> fields = new HashSet<>();
@@ -314,23 +354,17 @@ public class CustomGroupingSearch extends QueryComponent
 
         NamedList response = rb.rsp.getValues();
 
-        List<Integer> allDocIds = new ArrayList<Integer>();
-        List<Float> allScores = new ArrayList<Float>();
-        // we will have multiple responses if we execute multiple QueryComponents
-        // aggregate all results from all responses and prepare one final result to
-        // return to client
-        int res =0;
         SolrDocumentList result = new SolrDocumentList();
         for (int i = 0; i < response.size();i++) {
             if (response.getName(i) == "result") {
-                res++;
+
                 SolrDocumentList groupedResult = parseGroupedResults(response.getVal(i),rb,docValFields);
 
                 groupedResult.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
 
-                List<SolrDocument > d = groupedResult.stream().filter(o->(Integer)o.getFieldValue("Campaign_id")>0).collect(Collectors.toList());
+                if(groupedResult.size() > 0){
 
-                if(groupedResult != null && groupedResult.size()>0){
+                    //SolrDocumentList distinctResult = deDuplicateBasedOnQuality(groupedResult);
                     result.addAll(groupedResult.subList(0, Math.min(rows,groupedResult.size())));
                 }
                 result.setNumFound(groupedResult.getNumFound());
@@ -340,39 +374,41 @@ public class CustomGroupingSearch extends QueryComponent
         while(response.get("result")!=null){
             response.remove("result");
         }
+        response.remove("response");
 
         fillUpDocs(result,rb,docValFields);
         response.add("response", result);
     }
 
-    private void deDuplicateBasedOnQuality(SolrDocumentList list){
+    public SolrDocumentList deDuplicateBasedOnQuality(SolrDocumentList list){
 
         SolrDocumentList distinctList = new SolrDocumentList();
         if(list!=null)
         {
-            for (int i = 0; i < list.size(); i++) {
+            distinctList.add(list.get(0));
+
+            for (int i = 1; i < list.size(); i++) {
                 SolrDocument doc = list.get(i);
 
-                for(int j =0; j<distinctList.size(); j++){
+                for(int j = 0; j<distinctList.size(); j++){
                     if(doc.getFieldValue("Duplicate_grp_id").equals(distinctList.get(j).getFieldValue("Duplicate_grp_id"))){
                         SolrDocument d = distinctList.get(j);
-                        d=doc;
+                        if((Float)d.getFieldValue("quality") < (Float)doc.getFieldValue("quality"))
+                        {
+                            distinctList.set(j,doc);
+                        }
+                        Log.info("duplicate found");
                     }
+                    else
+                        distinctList.add(doc);
                 }
-                Optional<SolrDocument> d = distinctList.stream().filter(o->o.getFieldValue("Duplicate_grp_id").equals(doc.getFieldValue("Duplicate_grp_id"))).findAny();
-                if (d.isPresent()){
-                    SolrDocument dc = d.get();
-                    if((Float)dc.getFieldValue("quality") < (Float)doc.getFieldValue("quality")){
-                        dc = doc;
-                    }
-                }else
-                    distinctList.add(doc);
-
             }
         }
+
+        return distinctList;
     }
 
-    private SolrDocumentList parseGroupedResults(Object data,ResponseBuilder rb, Set<String> docValFields){
+    public SolrDocumentList parseGroupedResults(Object data,ResponseBuilder rb, Set<String> docValFields){
 
         SolrDocumentList solrDocumentList = new SolrDocumentList();
 
@@ -397,7 +433,7 @@ public class CustomGroupingSearch extends QueryComponent
         return solrDocumentList;
     }
 
-    private SolrDocumentList parseGroup(DocSlice docSlice, ResponseBuilder rb, String searchMethod,SolrDocumentList docList, Set<String> docValFields){
+    public SolrDocumentList parseGroup(DocSlice docSlice, ResponseBuilder rb, String searchMethod,SolrDocumentList docList, Set<String> docValFields){
 
         int index = 0;
         DocIterator iterator = docSlice.iterator();
@@ -447,29 +483,14 @@ public class CustomGroupingSearch extends QueryComponent
         return docList;
     }
 
-    private void extractDocDetails(List<Integer> allDocIds, List<Float> allScores, DocList resultContext) {
-        DocIterator itr = resultContext.iterator();
-        while (itr.hasNext()) {
-            int nextDocId = itr.nextDoc();
-            if (!allDocIds.contains(nextDocId)) { // we want to retain unique results
-                allDocIds.add(nextDocId);
-                if (resultContext.hasScores()) {
-                    allScores.add(itr.score());
-                } else {
-                    allScores.add(0.0f);
-                }
-            }
-        }
-    }
-
     private void fillUpDocs (SolrDocumentList docList,ResponseBuilder rb,Set<String> docValFields) throws IOException {
 
         Collection<SchemaField> fields = rb.req.getSchema().getFields().values();
 
-
         String fl = rb.req.getParams().get(CommonParams.FL);
 
         Set<String> remainingFields = new HashSet<>();
+
         if(fl.equals("*,score") || fl.equals("*")){
 
             remainingFields = fields.stream().map(SchemaField::getName).filter(o-> !docValFields.contains(o)).collect(Collectors.toSet());
@@ -478,22 +499,25 @@ public class CustomGroupingSearch extends QueryComponent
         {
             List<String>requestedFields = new ArrayList<>(Arrays.asList(fl.split("[,\\s]+")));
 
+
             if(! requestedFields.isEmpty() )
             {
                 remainingFields = requestedFields.stream().filter(o-> !docValFields.contains(o)).collect(Collectors.toSet());
+
+                if (requestedFields.contains("*"))
+                {
+                    Set<String> finalRemainingFields = remainingFields;
+
+                    remainingFields.addAll(fields.stream().map(SchemaField::getName).filter(o-> !finalRemainingFields.contains(o)).collect(Collectors.toList()));
+                }
             }
         }
 
         fields.remove("ID");
 
-        //Log.info("Contians ID: "+fields.contains("ID"));
-
-        //for (String field : fields)
-        //Log.info("field name to fill: "+field);
-
         SolrDocumentFetcher docFetcher =  rb.req.getSearcher().getDocFetcher();
 
-        for(int i =0; i<docList.size(); i++)
+        for(int i = 0; i<docList.size(); i++)
         {
             SolrDocument docBase = docList.get(i);
             int docId = (Integer) docBase.getFieldValue("luceneId");
@@ -501,11 +525,25 @@ public class CustomGroupingSearch extends QueryComponent
         }
     }
 
+    @Override
     public String getDescription() {
         return "CustomGroupingSearch";
     }
 
+    @Override
+    public void finishStage(ResponseBuilder rb){return;}
 
+    @Override
+    public void handleResponses(ResponseBuilder rb, ShardRequest sreq) {
+        return;
+    }
+
+    @Override
+    public int distributedProcess(ResponseBuilder rb) throws IOException {
+        return ResponseBuilder.STAGE_DONE;
+    }
+
+    @Override
     public NamedList<Object> getStatistics(){
         NamedList stats = new SimpleOrderedMap<Object>();
         stats.add("Custom stats totalTime(ms)",""+totalRequestTime);
