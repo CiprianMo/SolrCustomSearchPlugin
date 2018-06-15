@@ -1,11 +1,11 @@
 package rubrikk.solr;
 
-import com.google.protobuf.MapEntry;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
+import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.*;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SimpleOrderedMap;
@@ -26,6 +26,7 @@ import java.util.stream.Collectors;
 
 import static java.lang.Integer.parseInt;
 
+//extending the QueryComponent to let that do the actual search
 public class CustomGroupingSearch extends QueryComponent
 {
     private static final Logger Log = LoggerFactory.getLogger(CustomGroupingSearch.class);
@@ -36,12 +37,12 @@ public class CustomGroupingSearch extends QueryComponent
 
     private float[] placementOrderScore;
     private CampaignScoreTransformFactory transformFactory;
-    private CampaignScoreTransformFactory.CampaignsScoreTransformer docTransformer;
+
     private List<Integer> campaignIds;
 
     private Integer rows;
     private Integer withinGroupRows = 24;
-    private Set<String> fieldList;
+
 
     //for stats
     volatile long totalRequestTime;
@@ -75,11 +76,15 @@ public class CustomGroupingSearch extends QueryComponent
             return;
         }
 
-///TODO take in cosideration that users might also specify grouping params
-//        if(solrParams.getBool(GroupParams.GROUP)!=null){
-//            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-//                    "Solr Grouping not supported");
-//        }
+        if(solrParams.get(GroupParams.GROUP)!=null ||
+                solrParams.get(GroupParams.GROUP_LIMIT)!=null||
+                solrParams.get(GroupParams.GROUP_MAIN) !=null||
+                solrParams.get(GroupParams.GROUP_FIELD)!=null||
+                solrParams.get(GroupParams.GROUP_FORMAT)!=null)
+        {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+                    "Grouping parameters are not supported together with RubrikkGrouping parameters");
+        }
 
         if(solrParams.getInt("RubrikkGrouping.limit") !=null)
             withinGroupRows = solrParams.getInt("RubrikkGrouping.limit");
@@ -107,10 +112,6 @@ public class CustomGroupingSearch extends QueryComponent
             campaignIds = new ArrayList<>(idsString.stream().map(o-> parseInt((o))).collect(Collectors.toSet()));
         }
 
-        docTransformer = transformFactory.create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
-
-        fieldList = new HashSet<>();
-        fieldList.add("ID");
     }
 
     @Override
@@ -129,6 +130,7 @@ public class CustomGroupingSearch extends QueryComponent
 
         allSolrParams.put("normal",SolrParams.toSolrParams(params));
 
+
         if(!campaignIds.isEmpty()) {
 
             NamedList featuredParams = addFeaturedParams(params,campaignIds);
@@ -136,8 +138,8 @@ public class CustomGroupingSearch extends QueryComponent
             allSolrParams.put("featured",SolrParams.toSolrParams(featuredParams));
         }
 
-        Set<Integer> docIds = new HashSet<>();
-
+        // try to perform the searches in parallel only if we have campaigns to look for
+        // if not skip the overhead of creating parallel
         if (allSolrParams.size() > 1){
 
             allSolrParams.entrySet().stream().parallel().forEach(paramEntry->{
@@ -147,10 +149,6 @@ public class CustomGroupingSearch extends QueryComponent
                     processQuery(rb,paramEntry.getKey());
                 } catch (IOException e) {
                     e.printStackTrace();
-                }
-
-                if (rb.getResults() != null) { // if last query returned any results
-                    docIds.addAll(getDocIdsSet(rb.getResults().docList));
                 }
             });
         }
@@ -164,12 +162,7 @@ public class CustomGroupingSearch extends QueryComponent
             } catch (IOException e) {
                 e.printStackTrace();
             }
-
-            if (rb.getResults() != null) { // if last query returned any results
-                docIds.addAll(getDocIdsSet(rb.getResults().docList));
-            }
         }
-
 
         createResponse(rb);
 
@@ -322,6 +315,8 @@ public class CustomGroupingSearch extends QueryComponent
 
         NamedList grouped = (NamedList) data;
         if(grouped !=null){
+
+            //Adding a new field to identify what type of search has been done
             grouped.add("SearchMethod",searchMethod);
         }
         rb.rsp.getValues().remove("grouped");
@@ -329,22 +324,7 @@ public class CustomGroupingSearch extends QueryComponent
         rb.rsp.add("result",grouped);
     }
 
-    private Set<Integer> getDocIdsSet(DocList docList) {
-        Set<Integer> docIds = new HashSet<>();
-        if (docList !=null){
-            DocIterator itr = docList.iterator();
-            while (itr.hasNext()) {
-                docIds.add(itr.next());
-            }
-        }
-        return docIds;
-    }
-
     private void createResponse(ResponseBuilder rb) throws IOException {
-
-        Set<String> fields = new HashSet<>();
-        fields.add("quality");
-        fields.add("ID");
 
         Set<String> docValFields = new HashSet<>();
         docValFields.add("Campaign_id");
@@ -391,7 +371,7 @@ public class CustomGroupingSearch extends QueryComponent
                 SolrDocument doc = list.get(i);
 
                 for(int j = 0; j<distinctList.size(); j++){
-                    if(doc.getFieldValue("Duplicate_grp_id").equals(distinctList.get(j).getFieldValue("Duplicate_grp_id"))){
+                    if(doc.getFieldValue("duplicatehash").equals(distinctList.get(j).getFieldValue("duplicatehash"))){
                         SolrDocument d = distinctList.get(j);
                         if((Float)d.getFieldValue("quality") < (Float)doc.getFieldValue("quality"))
                         {
@@ -399,8 +379,10 @@ public class CustomGroupingSearch extends QueryComponent
                         }
                         Log.info("duplicate found");
                     }
-                    else
+                    else{
                         distinctList.add(doc);
+                        break;
+                    }
                 }
             }
         }
@@ -454,6 +436,10 @@ public class CustomGroupingSearch extends QueryComponent
             docBase.addField("score",iterator.score());
             docBase.addField("luceneId",docSetId);
 
+            Set<String> fieldList = new HashSet<>();
+            fieldList.add("ID");
+            fieldList.add("quality");
+
             Document doc = null;
             try {
                 doc = rb.req.getSearcher().doc(docSetId,fieldList);
@@ -472,6 +458,10 @@ public class CustomGroupingSearch extends QueryComponent
                 else
                     docBase.addField(field.name(), fieldvalue);
             }
+
+            //TODO probably doesn't have to be a Tansformer object
+            CampaignScoreTransformFactory.CampaignsScoreTransformer docTransformer = transformFactory.
+                    create(FIELD_TO_APPEND,rb.req.getParams(),rb.req);
 
             docTransformer.transform(docBase,iterator.score(),placementOrderScore[index++],(searchMethod=="featured"));
 
@@ -513,8 +503,6 @@ public class CustomGroupingSearch extends QueryComponent
             }
         }
 
-        fields.remove("ID");
-
         SolrDocumentFetcher docFetcher =  rb.req.getSearcher().getDocFetcher();
 
         for(int i = 0; i<docList.size(); i++)
@@ -528,19 +516,6 @@ public class CustomGroupingSearch extends QueryComponent
     @Override
     public String getDescription() {
         return "CustomGroupingSearch";
-    }
-
-    @Override
-    public void finishStage(ResponseBuilder rb){return;}
-
-    @Override
-    public void handleResponses(ResponseBuilder rb, ShardRequest sreq) {
-        return;
-    }
-
-    @Override
-    public int distributedProcess(ResponseBuilder rb) throws IOException {
-        return ResponseBuilder.STAGE_DONE;
     }
 
     @Override
