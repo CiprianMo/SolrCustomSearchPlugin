@@ -30,7 +30,7 @@ public class CampaignScoreTransformFactory extends TransformerFactory
         return new CampaignsScoreTransformer(field,campaigns);
     }
 
-    class CampaignsScoreTransformer extends DocTransformer
+    public class CampaignsScoreTransformer extends DocTransformer
     {
         private final String name;
         private final Map<String,Float> campaigns;
@@ -59,13 +59,10 @@ public class CampaignScoreTransformFactory extends TransformerFactory
 
             Float value;
 
-            if(doc.getFieldValue("Quality_boost")!=null)
-                value = ((Double) doc.getFieldValue("Quality_boost")).floatValue();
-            else
-                value = ((Double) doc.getFieldValue("quality")).floatValue();
-
             if(!Float.valueOf(score).isNaN())
-               value *= score;
+               value = score;
+            else
+                value =1.0f;
 
             if(boostCampaigns && campaigns.containsKey(docCampaignId))
 

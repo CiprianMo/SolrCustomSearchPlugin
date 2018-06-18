@@ -3,6 +3,7 @@ package rubrikk.solr;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.search.Sort;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrException;
@@ -43,7 +44,6 @@ public class CustomGroupingSearch extends QueryComponent
     private Integer rows;
     private Integer withinGroupRows = 24;
 
-
     //for stats
     volatile long totalRequestTime;
 
@@ -59,7 +59,6 @@ public class CustomGroupingSearch extends QueryComponent
     public void prepare(ResponseBuilder rb) throws IOException {
 
         useRubrikkGrouping = false;
-
 
         SolrParams solrParams = rb.req.getParams();
 
@@ -89,19 +88,11 @@ public class CustomGroupingSearch extends QueryComponent
         if(solrParams.getInt("RubrikkGrouping.limit") !=null)
             withinGroupRows = solrParams.getInt("RubrikkGrouping.limit");
 
-        NamedList params = solrParams.toNamedList();
-
-        parseNormalParams(params);
-
-        Map<String,Object> mappedParams = params.asShallowMap();
-
-        rb.req.setParams(new MapSolrParams(mappedParams.entrySet().stream()
-                .collect(Collectors.toMap(x-> x.getKey(), x-> String.valueOf(x.getValue())))));
-
         transformFactory = new CampaignScoreTransformFactory();
 
         ObjectMapper objectMapper = new ObjectMapper();
 
+        // we need to clean this list from the previous search
         campaignIds = new ArrayList<>();
 
         if(solrParams.get("Campaign") != null){
@@ -111,7 +102,6 @@ public class CustomGroupingSearch extends QueryComponent
             Set<String> idsString = campaigns.asShallowMap().keySet();
             campaignIds = new ArrayList<>(idsString.stream().map(o-> parseInt((o))).collect(Collectors.toSet()));
         }
-
     }
 
     @Override
@@ -123,23 +113,27 @@ public class CustomGroupingSearch extends QueryComponent
             totalRequestTime+=System.currentTimeMillis()-lstartTime;
             return;
         }
+        Map<String,SolrParams> allSolrParams = new HashMap<>();
+
 
         NamedList params = rb.req.getParams().toNamedList();
 
-        Map<String,SolrParams> allSolrParams = new HashMap<>();
+        //cleaning the Rubrikk solr parameters and adding grouping parameters.
+        parseNormalParams(params);
 
+        //adding the solr parameters for the normal search
         allSolrParams.put("normal",SolrParams.toSolrParams(params));
-
 
         if(!campaignIds.isEmpty()) {
 
             NamedList featuredParams = addFeaturedParams(params,campaignIds);
 
+            //adding solr parameters for the customer campaigns search
             allSolrParams.put("featured",SolrParams.toSolrParams(featuredParams));
         }
 
         // try to perform the searches in parallel only if we have campaigns to look for
-        // if not skip the overhead of creating parallel
+        // if not skip the overhead of creating parallel logic
         if (allSolrParams.size() > 1){
 
             allSolrParams.entrySet().stream().parallel().forEach(paramEntry->{
@@ -154,6 +148,7 @@ public class CustomGroupingSearch extends QueryComponent
         }
         else{
 
+            //extract only the first set of solr parameters, which corresponds to the normal search
             Map.Entry<String,SolrParams> paramEntry = allSolrParams.entrySet().iterator().next();
 
             rb.req.setParams(paramEntry.getValue());
@@ -164,6 +159,8 @@ public class CustomGroupingSearch extends QueryComponent
             }
         }
 
+        //at this moment the SolrQueryResponse in rb will contain 2 grouped responses with
+        //here we are flattening and combining the groups into one response
         createResponse(rb);
 
         totalRequestTime+=System.currentTimeMillis()-lstartTime;
@@ -173,7 +170,6 @@ public class CustomGroupingSearch extends QueryComponent
 
         NamedList featured = new NamedList(params.asShallowMap());
         String campaignFilter = new String();
-
 
         for(int campaignid: campaignIds){
             campaignFilter+="Campaign_id:["+campaignid+" TO "+campaignid+"] OR ";
@@ -244,42 +240,6 @@ public class CustomGroupingSearch extends QueryComponent
             }
         }
 
-//        Log.info("Params: "+params.toString());
-//
-//        Object fqParams = params.get(CommonParams.FQ);
-//
-//        if(fqParams instanceof String[])
-//        {
-//            List<String> filters = Arrays.asList((String[])params.get(CommonParams.FQ));
-//            String fqList = new String();
-//            for (String filter :filters){
-//                fqList+=filter+" AND ";
-//            }
-//
-//            if(fqList.endsWith(" AND ")){
-//                fqList=fqList.substring(0,fqList.length()-5);
-//            }
-//            params.remove(CommonParams.FQ);
-//            params.add(CommonParams.FQ,fqList);
-//        }
-//
-//        Object bqParams = params.get("bq");
-//
-//        if(bqParams instanceof String[])
-//        {
-//            List<String> bqs = Arrays.asList((String[])params.get("bq"));
-//            String fqList = new String();
-//            for (String filter :bqs){
-//                fqList+=filter+" AND ";
-//            }
-//
-//            if(fqList.endsWith(" AND ")){
-//                fqList=fqList.substring(0,fqList.length()-5);
-//            }
-//            params.remove("bq");
-//            params.add("bq",fqList);
-//        }
-
         List<String> fls;
 
         if(params.get(CommonParams.FL) instanceof String[]){
@@ -309,8 +269,13 @@ public class CustomGroupingSearch extends QueryComponent
         rb.setQuery(null);
         rb.setQueryString(null);
 
+        Sort s = rb.getSortSpec().getSort();
+
+        Log.info("Sorting specs: "+s.toString());
+
         super.prepare(rb);
         super.process(rb);
+
         Object data = rb.rsp.getValues().get("grouped");
 
         NamedList grouped = (NamedList) data;
@@ -326,6 +291,7 @@ public class CustomGroupingSearch extends QueryComponent
 
     private void createResponse(ResponseBuilder rb) throws IOException {
 
+        //This fields are needed right away because we need to calculate new type of score - GroupOrderScore
         Set<String> docValFields = new HashSet<>();
         docValFields.add("Campaign_id");
         docValFields.add("Quality_boost");
@@ -340,11 +306,11 @@ public class CustomGroupingSearch extends QueryComponent
 
                 SolrDocumentList groupedResult = parseGroupedResults(response.getVal(i),rb,docValFields);
 
-                groupedResult.sort((o1,o2) -> Float.compare((float)o2.getFieldValue(FIELD_TO_APPEND), (float)o1.getFieldValue(FIELD_TO_APPEND)));
+                groupedResult.sort((o1,o2) -> Float.compare((float)o2.getFieldValue("score"), (float)o1.getFieldValue("score")));
 
                 if(groupedResult.size() > 0){
 
-                    //SolrDocumentList distinctResult = deDuplicateBasedOnQuality(groupedResult);
+                    //get only the top (rows) documents from the flattened grouped results
                     result.addAll(groupedResult.subList(0, Math.min(rows,groupedResult.size())));
                 }
                 result.setNumFound(groupedResult.getNumFound());
@@ -354,8 +320,12 @@ public class CustomGroupingSearch extends QueryComponent
         while(response.get("result")!=null){
             response.remove("result");
         }
+
+        //we clean the response that comes from the default SearchComponent which is "QueryComponent"
+        //since "QueryComponent" will run by default, it probably adds time to overall qtime
         response.remove("response");
 
+        //we only want to fill up the rest of the field for the documents in the final result.
         fillUpDocs(result,rb,docValFields);
         response.add("response", result);
     }
