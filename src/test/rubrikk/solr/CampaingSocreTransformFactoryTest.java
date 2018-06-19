@@ -24,6 +24,6 @@ public class CampaingSocreTransformFactoryTest {
 
         cc.transform(solrDoc,-4f,0.89f,false);
 
-        Assert.assertEquals(8f*0.89f,solrDoc.getFieldValue("orderscore"));
+        Assert.assertEquals(-3.56f,solrDoc.getFieldValue("orderscore"));
     }
 }

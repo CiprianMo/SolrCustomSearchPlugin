@@ -36,28 +36,36 @@ public class CustomGroupingSearch extends QueryComponent
 
     private boolean useRubrikkGrouping = false;
 
-    private float[] placementOrderScore;
-    private CampaignScoreTransformFactory transformFactory;
+    private ObjectMapper objectMapper;
+
+    private static float[] placementOrderScore;
+    private CampaignScoreTransformFactory transformFactory = new CampaignScoreTransformFactory();
 
     private List<Integer> campaignIds;
 
     private Integer rows;
     private Integer withinGroupRows = 24;
 
-    //for stats
-    volatile long totalRequestTime;
-
     @Override
     public void init(NamedList args){
-
+        long lstartTime = System.currentTimeMillis();
+        long totalRequestTime=0;
         List<Float> placementOrderScoreList = ((NamedList)args.get("placementScore")).getAll("score");
         if(placementOrderScoreList !=null)
             placementOrderScore = ArrayUtils.toPrimitive(placementOrderScoreList.toArray(new Float[0]));
+
+         new ObjectMapper();
+
+        totalRequestTime+=System.currentTimeMillis()-lstartTime;
+        Log.info("init qtime "+totalRequestTime);
+
+
     }
 
     @Override
     public void prepare(ResponseBuilder rb) throws IOException {
-
+        long lstartTime = System.currentTimeMillis();
+        long totalRequestTime=0;
         useRubrikkGrouping = false;
 
         SolrParams solrParams = rb.req.getParams();
@@ -88,10 +96,6 @@ public class CustomGroupingSearch extends QueryComponent
         if(solrParams.getInt("RubrikkGrouping.limit") !=null)
             withinGroupRows = solrParams.getInt("RubrikkGrouping.limit");
 
-        transformFactory = new CampaignScoreTransformFactory();
-
-        ObjectMapper objectMapper = new ObjectMapper();
-
         // we need to clean this list from the previous search
         campaignIds = new ArrayList<>();
 
@@ -102,21 +106,21 @@ public class CustomGroupingSearch extends QueryComponent
             Set<String> idsString = campaigns.asShallowMap().keySet();
             campaignIds = new ArrayList<>(idsString.stream().map(o-> parseInt((o))).collect(Collectors.toSet()));
         }
+        totalRequestTime+=System.currentTimeMillis()-lstartTime;
+        Log.info("main prepare method qtime "+totalRequestTime);
     }
 
     @Override
     public void process(ResponseBuilder rb) throws IOException {
 
         long lstartTime = System.currentTimeMillis();
+        long totalRequestTime=0;
 
         if(!useRubrikkGrouping || (rb.req.getParams().getBool(ShardParams.IS_SHARD) !=null && rb.req.getParams().getBool(ShardParams.IS_SHARD) == true )){
-            totalRequestTime+=System.currentTimeMillis()-lstartTime;
             return;
         }
         Map<String,SolrParams> allSolrParams = new HashMap<>();
-
-
-        NamedList params = rb.req.getParams().toNamedList();
+                NamedList params = rb.req.getParams().toNamedList();
 
         //cleaning the Rubrikk solr parameters and adding grouping parameters.
         parseNormalParams(params);
@@ -132,7 +136,7 @@ public class CustomGroupingSearch extends QueryComponent
             allSolrParams.put("featured",SolrParams.toSolrParams(featuredParams));
         }
 
-        // try to perform the searches in parallel only if we have campaigns to look for
+        // try to perform the searches in parallel only if we have campaigns, to look for
         // if not skip the overhead of creating parallel logic
         if (allSolrParams.size() > 1){
 
@@ -164,6 +168,7 @@ public class CustomGroupingSearch extends QueryComponent
         createResponse(rb);
 
         totalRequestTime+=System.currentTimeMillis()-lstartTime;
+        Log.info("main process method qtime "+totalRequestTime);
     }
 
     public NamedList addFeaturedParams(NamedList params, List<Integer> campaignIds){
@@ -217,6 +222,10 @@ public class CustomGroupingSearch extends QueryComponent
             }
         }
 
+        //adding boost
+        featured.remove("boost");
+        featured.add("boost","quality");
+
         return featured;
     }
 
@@ -259,6 +268,7 @@ public class CustomGroupingSearch extends QueryComponent
             params.add(CommonParams.FL,String.join(", ",fls));
         }
 
+        params.add("boost","Quality_boost");
         params.add(GroupParams.GROUP,true);
         params.add(GroupParams.GROUP_FIELD,"domain");
         params.add(GroupParams.GROUP_FORMAT,"grouped");
@@ -266,12 +276,12 @@ public class CustomGroupingSearch extends QueryComponent
     }
 
     protected void processQuery(ResponseBuilder rb,String searchMethod) throws IOException {
+
+        long totalRequestTime = 0;
+        long lstartTime = System.currentTimeMillis();
+
         rb.setQuery(null);
         rb.setQueryString(null);
-
-        Sort s = rb.getSortSpec().getSort();
-
-        Log.info("Sorting specs: "+s.toString());
 
         super.prepare(rb);
         super.process(rb);
@@ -287,6 +297,8 @@ public class CustomGroupingSearch extends QueryComponent
         rb.rsp.getValues().remove("grouped");
 
         rb.rsp.add("result",grouped);
+        totalRequestTime+=System.currentTimeMillis()-lstartTime;
+        Log.info(searchMethod+" method qtime "+totalRequestTime);
     }
 
     private void createResponse(ResponseBuilder rb) throws IOException {
@@ -491,7 +503,7 @@ public class CustomGroupingSearch extends QueryComponent
     @Override
     public NamedList<Object> getStatistics(){
         NamedList stats = new SimpleOrderedMap<Object>();
-        stats.add("Custom stats totalTime(ms)",""+totalRequestTime);
+        //stats.add("Custom stats totalTime(ms)",""+totalRequestTime);
         return stats;
     }
 
