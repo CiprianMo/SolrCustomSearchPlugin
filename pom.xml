@@ -8,7 +8,7 @@
     <artifactId>custom-solr-plugins</artifactId>
     <version>1.0</version>
     <properties>
-        <solr.version>6.6.0</solr.version>
+        <solr.version>8.4.0</solr.version>
     </properties>
     <dependencies>
         <dependency>
